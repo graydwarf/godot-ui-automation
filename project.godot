@@ -1,0 +1,23 @@
+; Engine configuration file.
+; It's best edited using the editor UI and not directly,
+; since the parameters that go here are not all obvious.
+;
+; Format:
+;   [section] ; section goes between []
+;   param=value ; assign values to parameters
+
+config_version=5
+
+[application]
+
+config/name="UI Test Runner Plugin"
+config/description="Visual UI Test Automation framework for Godot 4.x"
+config/features=PackedStringArray("4.5", "Forward Plus")
+
+[autoload]
+
+UITestRunner="*res://addons/ui-test-runner/ui-test-runner.gd"
+
+[editor_plugins]
+
+enabled=PackedStringArray("res://addons/ui-test-runner/plugin.cfg")
