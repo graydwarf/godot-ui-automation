@@ -1,5 +1,15 @@
+# =============================================================================
+# UI Test Runner - Visual UI Automation Testing for Godot
+# =============================================================================
+# MIT License - Copyright (c) 2025 Poplava
+#
+# Support & Community:
+#   Discord: https://discord.gg/9GnrTKXGfq
+#   GitHub:  https://github.com/graydwarf/godot-ui-test-runner
+#   More Tools: https://poplava.itch.io
+# =============================================================================
+
 extends RefCounted
-class_name UITestManager
 ## Test Manager panel for UI Test Runner
 
 const Utils = preload("res://addons/ui-test-runner/utils.gd")
@@ -22,6 +32,7 @@ signal results_clear_requested()
 signal view_failed_step_requested(test_name: String, failed_step: int)
 signal view_diff_requested(result: Dictionary)
 signal speed_changed(speed_index: int)
+signal test_rerun_requested(test_name: String, result_index: int)
 signal closed()
 
 var _panel: Panel = null
@@ -820,10 +831,10 @@ func update_results_tab() -> void:
 		results_label.text = text
 
 	# Add result rows
-	for result in batch_results:
-		_add_result_row(results_list, result)
+	for i in range(batch_results.size()):
+		_add_result_row(results_list, batch_results[i], i)
 
-func _add_result_row(results_list: Control, result: Dictionary) -> void:
+func _add_result_row(results_list: Control, result: Dictionary, result_index: int) -> void:
 	var row = HBoxContainer.new()
 	row.add_theme_constant_override("separation", 10)
 	results_list.add_child(row)
@@ -849,6 +860,14 @@ func _add_result_row(results_list: Control, result: Dictionary) -> void:
 	name_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	name_label.add_theme_color_override("font_color", Color(0.85, 0.85, 0.9))
 	row.add_child(name_label)
+
+	# Rerun button - always show
+	var rerun_btn = Button.new()
+	rerun_btn.text = "↻"
+	rerun_btn.tooltip_text = "Rerun this test"
+	rerun_btn.custom_minimum_size = Vector2(32, 28)
+	rerun_btn.pressed.connect(_on_rerun_test.bind(result.name, result_index))
+	row.add_child(rerun_btn)
 
 	# Only show View Diff for failed tests (not cancelled, not passed)
 	if not result.passed and not is_cancelled:
@@ -885,6 +904,9 @@ func _on_edit_category(category_name: String) -> void:
 
 func _on_clear_results() -> void:
 	results_clear_requested.emit()
+
+func _on_rerun_test(test_name: String, result_index: int) -> void:
+	test_rerun_requested.emit(test_name, result_index)
 
 func _on_toggle_category(category_name: String) -> void:
 	var is_collapsed = CategoryManager.collapsed_categories.get(category_name, false)

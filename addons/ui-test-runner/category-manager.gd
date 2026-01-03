@@ -1,4 +1,14 @@
-class_name UICategoryManager
+# =============================================================================
+# UI Test Runner - Visual UI Automation Testing for Godot
+# =============================================================================
+# MIT License - Copyright (c) 2025 Poplava
+#
+# Support & Community:
+#   Discord: https://discord.gg/9GnrTKXGfq
+#   GitHub:  https://github.com/graydwarf/godot-ui-test-runner
+#   More Tools: https://poplava.itch.io
+# =============================================================================
+
 extends RefCounted
 ## Category management for UI Test Runner
 

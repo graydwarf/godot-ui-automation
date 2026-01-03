@@ -22,19 +22,39 @@ A visual UI test automation framework for Godot 4.x that enables recording, play
 
 ### Keyboard Shortcuts
 
-- **F9**: Run demo (if configured)
-- **F10**: Toggle playback speed / Capture screenshot (during recording)
-- **F11**: Start/Stop recording
-- **F12**: Open Test Manager
+| Key | Action |
+|-----|--------|
+| **F12** | Toggle Test Manager |
+| **F11** | Start/Stop Recording |
+| **F10** | Capture screenshot (during recording) |
+| **T** | Terminate drag segment (during recording) |
+| **P** | Pause/Resume test playback |
+| **Space** | Step forward (when paused) |
+| **R** | Restart current test |
+| **ESC** | Cancel recording / Close dialogs / Stop test |
 
 ### Recording a Test
 
 1. Press **F11** to start recording
 2. Interact with your UI - clicks, drags, and keyboard input are captured
 3. Press **F10** to capture screenshot checkpoints at important moments
-4. Press **F11** to stop recording
-5. Edit test name and step delays in the Event Editor
-6. Click **Save Test**
+4. Press **T** to terminate a drag segment (useful for complex drag operations)
+5. Press **F11** to stop recording
+6. Edit test name and step delays in the Event Editor
+7. Click **Save Test**
+
+### Adding Delays
+
+During recording, you can add wait periods between actions:
+- Use the **wait dropdown** in the Event Editor to adjust delays for each step
+- Click **Insert Wait** to add a dedicated wait step at any point
+
+### Terminate Drag
+
+Press **T** during recording to terminate a drag segment. This is useful when:
+- Recording complex drag operations that should be split into multiple segments
+- You need precise control over where drag operations end
+- The automatic drag detection isn't capturing your intended behavior
 
 ### Running Tests
 
@@ -42,6 +62,7 @@ A visual UI test automation framework for Godot 4.x that enables recording, play
 2. Click the play button (▶) next to a test to run it
 3. Use "Run All Tests" to execute all tests in sequence
 4. View results in the Results tab
+5. Click the rerun button (↻) to rerun individual tests from results
 
 ### Test Organization
 
@@ -51,16 +72,18 @@ A visual UI test automation framework for Godot 4.x that enables recording, play
 
 ## Configuration
 
-In the Test Manager's Config tab:
+In the Test Manager's Settings tab:
 
-- **Playback Speed**: Instant, Fast, Normal, or Slow
+- **Playback Speed**: Instant, Fast, Normal, Slow, or Step (manual)
 - **Comparison Mode**: Pixel Perfect or Tolerant
 - **Pixel Tolerance**: Percentage of pixels allowed to differ (0-10%)
 - **Color Threshold**: Maximum RGB difference per pixel (0-50)
 
+Settings are saved to: `user://ui-test-runner-config.cfg`
+
 ## File Structure
 
-Tests are stored as JSON files in `res://tests/ui-tests/`:
+Tests are stored in `res://tests/ui-tests/`:
 - Test definitions: `test_name.json`
 - Baseline screenshots: `res://tests/baselines/baseline_test_name.png`
 
@@ -69,6 +92,14 @@ Tests are stored as JSON files in `res://tests/ui-tests/`:
 - Godot 4.5+
 - Windows (currently tested on Windows only)
 
+## Support & Community
+
+- **Discord**: https://discord.gg/9GnrTKXGfq
+- **GitHub**: https://github.com/graydwarf/godot-ui-test-runner
+- **More Tools**: https://poplava.itch.io
+
 ## License
 
-MIT License - See LICENSE file for details
+MIT License - Copyright (c) 2025 Poplava
+
+See LICENSE file for details.

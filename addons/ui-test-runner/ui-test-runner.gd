@@ -1,5 +1,15 @@
+# =============================================================================
+# UI Test Runner - Visual UI Automation Testing for Godot
+# =============================================================================
+# MIT License - Copyright (c) 2025 Poplava
+#
+# Support & Community:
+#   Discord: https://discord.gg/9GnrTKXGfq
+#   GitHub:  https://github.com/graydwarf/godot-ui-test-runner
+#   More Tools: https://poplava.itch.io
+# =============================================================================
+
 extends CanvasLayer
-class_name UITestRunnerAutoload
 ## Visual UI Test Runner - Autoload singleton for automated UI testing
 ## Provides tweened mouse simulation with visible cursor feedback
 
@@ -157,7 +167,7 @@ func _ready():
 	ScreenshotValidator.load_config()
 	# Apply loaded playback speed
 	_playback.set_speed(ScreenshotValidator.playback_speed as Speed)
-	print("[UITestRunner] Ready - F9: demo | F10: speed | F11: record | F12: Test Manager")
+	print("[UI Test Runner] Initialized - F11: Record | F12: Test Manager")
 
 func _setup_playback_engine():
 	_playback = PlaybackEngine.new()
@@ -349,6 +359,7 @@ func _setup_test_manager():
 	_test_manager.view_failed_step_requested.connect(_on_view_failed_step)
 	_test_manager.view_diff_requested.connect(_view_failed_test_diff)
 	_test_manager.speed_changed.connect(_on_speed_selected)
+	_test_manager.test_rerun_requested.connect(_on_rerun_test_from_results)
 	_test_manager.closed.connect(_on_test_manager_closed)
 
 func _on_manager_test_run(test_name: String):
@@ -361,6 +372,24 @@ func _on_manager_test_debug(test_name: String):
 
 func _on_test_manager_closed():
 	is_selector_open = false
+
+func _on_rerun_test_from_results(test_name: String, result_index: int):
+	if is_running:
+		print("[UITestRunner] Cannot rerun - test already running")
+		return
+	_close_test_selector()
+	ui_test_runner_setup_environment.emit()
+	await get_tree().create_timer(0.5).timeout
+	ui_test_runner_test_starting.emit(test_name)
+	await get_tree().create_timer(0.3).timeout
+	var result = await _run_test_and_get_result(test_name)
+	if result_index >= 0 and result_index < batch_results.size():
+		batch_results[result_index] = result
+	else:
+		batch_results.append(result)
+	_open_test_selector()
+	_test_manager.switch_to_results_tab()
+	_update_results_tab()
 
 func _on_region_selection_completed(rect: Rect2):
 	# Handle during-recording screenshot capture
@@ -438,6 +467,12 @@ func _create_fallback_cursor():
 	add_child(virtual_cursor)
 
 func _input(event):
+	# F12 to toggle Test Manager (high priority - handle before other nodes consume it)
+	if event is InputEventKey and event.pressed and event.keycode == KEY_F12:
+		_toggle_test_selector()
+		get_viewport().set_input_as_handled()
+		return
+
 	# Forward mouse events to test manager for drag handling (needs _input, not _unhandled_input)
 	if _test_manager and _test_manager.is_open:
 		if event is InputEventMouseMotion or event is InputEventMouseButton:
@@ -589,18 +624,12 @@ func _unhandled_input(event):
 				_close_test_selector()
 				return
 
-		if event.keycode == KEY_F9:
-			_start_demo_test()
-		elif event.keycode == KEY_F10:
+		if event.keycode == KEY_F10:
+			# F10 captures screenshot during recording only
 			if is_recording:
-				# Capture screenshot during recording
 				_capture_screenshot_during_recording()
-			else:
-				cycle_speed()
 		elif event.keycode == KEY_F11:
 			_toggle_recording()
-		elif event.keycode == KEY_F12:
-			_toggle_test_selector()
 
 func _start_demo_test():
 	print("[UITestRunner] F9 pressed, is_running=", is_running)
