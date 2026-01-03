@@ -33,6 +33,7 @@ signal view_failed_step_requested(test_name: String, failed_step: int)
 signal view_diff_requested(result: Dictionary)
 signal speed_changed(speed_index: int)
 signal test_rerun_requested(test_name: String, result_index: int)
+signal test_debug_from_results_requested(test_name: String)
 signal closed()
 
 var _panel: Panel = null
@@ -641,6 +642,16 @@ func _create_about_tab(tabs: TabContainer) -> void:
 	help_scroll.add_child(help_vbox)
 
 	# Help topics
+	_add_help_topic(help_vbox, "Keyboard Shortcuts",
+		"F12: Toggle Test Manager\n" +
+		"F11: Start/Stop Recording\n" +
+		"F10: Capture screenshot (during recording)\n" +
+		"T: Terminate drag segment (during recording)\n" +
+		"P: Pause/Resume test playback\n" +
+		"Space: Step forward (when paused)\n" +
+		"R: Restart current test\n" +
+		"ESC: Cancel recording / Close dialogs / Stop test")
+
 	_add_help_topic(help_vbox, "Recording Tests",
 		"Press F11 or click 'Record New Test' to start recording. Interact with your UI normally - " +
 		"clicks, drags, and text input are captured. Press F10 to take screenshots at key moments. " +
@@ -675,16 +686,6 @@ func _create_about_tab(tabs: TabContainer) -> void:
 	_add_help_topic(help_vbox, "Updating Baselines",
 		"When UI intentionally changes, click the rerecord button (↻) to capture new baseline screenshots. " +
 		"This runs the test and saves new reference images without failing on differences.")
-
-	_add_help_topic(help_vbox, "Keyboard Shortcuts",
-		"F12: Toggle Test Manager\n" +
-		"F11: Start/Stop Recording\n" +
-		"F10: Capture screenshot (during recording)\n" +
-		"T: Terminate drag segment (during recording)\n" +
-		"P: Pause/Resume test playback\n" +
-		"Space: Step forward (when paused)\n" +
-		"R: Restart current test\n" +
-		"ESC: Cancel recording / Close dialogs / Stop test")
 
 	_add_help_topic(help_vbox, "Settings & Config",
 		"Your preferences (comparison mode, tolerance, playback speed) are saved to " +
@@ -1039,6 +1040,17 @@ func _add_result_row(results_list: Control, result: Dictionary, result_index: in
 	rerun_btn.pressed.connect(_on_rerun_test.bind(result.name, result_index))
 	row.add_child(rerun_btn)
 
+	# Debug button - show for failed tests to step through and diagnose
+	if not result.passed and not is_cancelled:
+		var debug_btn = Button.new()
+		debug_btn.text = ">|"
+		debug_btn.tooltip_text = "Debug: step through test (won't change result)"
+		debug_btn.custom_minimum_size = Vector2(32, 28)
+		debug_btn.add_theme_color_override("font_color", Color(1.0, 0.7, 0.2))
+		debug_btn.add_theme_color_override("font_hover_color", Color(1.0, 0.85, 0.4))
+		debug_btn.pressed.connect(_on_debug_from_results.bind(result.name))
+		row.add_child(debug_btn)
+
 	# Only show View Diff for failed tests (not cancelled, not passed)
 	if not result.passed and not is_cancelled:
 		if result.failed_step > 0:
@@ -1077,6 +1089,9 @@ func _on_clear_results() -> void:
 
 func _on_rerun_test(test_name: String, result_index: int) -> void:
 	test_rerun_requested.emit(test_name, result_index)
+
+func _on_debug_from_results(test_name: String) -> void:
+	test_debug_from_results_requested.emit(test_name)
 
 func _on_toggle_category(category_name: String) -> void:
 	var is_collapsed = CategoryManager.collapsed_categories.get(category_name, false)

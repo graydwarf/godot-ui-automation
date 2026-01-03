@@ -360,6 +360,7 @@ func _setup_test_manager():
 	_test_manager.view_diff_requested.connect(_view_failed_test_diff)
 	_test_manager.speed_changed.connect(_on_speed_selected)
 	_test_manager.test_rerun_requested.connect(_on_rerun_test_from_results)
+	_test_manager.test_debug_from_results_requested.connect(_on_debug_test_from_results)
 	_test_manager.closed.connect(_on_test_manager_closed)
 
 func _on_manager_test_run(test_name: String):
@@ -390,6 +391,23 @@ func _on_rerun_test_from_results(test_name: String, result_index: int):
 	_open_test_selector()
 	_test_manager.switch_to_results_tab()
 	_update_results_tab()
+
+func _on_debug_test_from_results(test_name: String):
+	# Debug/step through a failed test without altering the stored result
+	if is_running:
+		print("[UITestRunner] Cannot debug - test already running")
+		return
+	_close_test_selector()
+	_executor.set_step_mode(true)
+	ui_test_runner_setup_environment.emit()
+	await get_tree().create_timer(0.5).timeout
+	ui_test_runner_test_starting.emit(test_name)
+	await get_tree().create_timer(0.3).timeout
+	# Run but don't store result - this is just for debugging
+	await _run_test_and_get_result(test_name)
+	_executor.set_step_mode(false)
+	_open_test_selector()
+	_test_manager.switch_to_results_tab()
 
 func _on_region_selection_completed(rect: Rect2):
 	# Handle during-recording screenshot capture
