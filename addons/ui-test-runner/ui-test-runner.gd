@@ -27,12 +27,23 @@ signal test_completed(test_name: String, passed: bool)
 signal action_performed(action: String, details: Dictionary)
 signal test_mode_changed(active: bool)
 
+# App-facing signals for test automation setup/cleanup
+# Apps can connect to these to configure their environment for testing
+signal ui_test_runner_setup_environment()  # Emitted at start of test run (go fullscreen, navigate to test board)
+signal ui_test_runner_test_starting(test_name: String)  # Emitted before each test (app can cleanup)
+signal ui_test_runner_test_ended(test_name: String, passed: bool)  # Emitted after each test
+signal ui_test_runner_run_completed()  # Emitted when all tests complete
+
 # Test mode flag - when true, board should disable auto-panning
 var test_mode_active: bool = false:
 	set(value):
 		test_mode_active = value
 		# Set generic automation flag on tree (decoupled from test framework)
 		get_tree().set_meta("automation_mode", value)
+
+# Injected test image for playback - bypasses system clipboard
+# Set by playback engine, consumed by clipboard manager
+var injected_clipboard_image: Image = null
 
 var virtual_cursor: Node2D
 var current_test_name: String = ""
@@ -53,6 +64,21 @@ var _executor: TestExecutor
 var _comparison_viewer: ComparisonViewer
 var _event_editor: EventEditor
 var _test_manager: TestManager
+
+# Playback debug HUD
+var _playback_hud: Control
+var _playback_hud_step_label: Label
+var _playback_hud_event_label: Label
+var _playback_hud_pause_continue_btn: Button  # Toggle: Pause when running, Continue when paused
+var _playback_hud_step_btn: Button
+var _playback_hud_restart_btn: Button
+var _playback_hud_details_btn: Button  # Toggle details visibility
+var _playback_hud_details_container: VBoxContainer  # Collapsible details section
+var _playback_hud_pos_label: Label  # Shows expected vs actual position
+
+# Track current test for restart functionality
+var _current_running_test_name: String = ""
+var _debug_here_mode: bool = false  # Skip environment setup, run on current board
 
 # Reference to main viewport for coordinate conversion
 var main_viewport: Viewport
@@ -94,6 +120,7 @@ var is_selector_open: bool = false
 # Batch test execution
 var batch_results: Array[Dictionary] = []  # [{name, passed, baseline_path, actual_path}]
 var is_batch_running: bool = false
+var _batch_cancelled: bool = false  # Set to true to cancel batch run
 
 # Re-recording state (for Update Baseline)
 var rerecording_test_name: String = ""  # When non-empty, save will overwrite this test
@@ -112,11 +139,12 @@ var last_actual_path: String = ""
 var pending_baseline_path: String = ""
 var pending_baseline_region: Dictionary = {}  # For legacy tests with baseline_region
 var pending_test_name: String = ""
+var editing_original_filename: String = ""  # When editing existing test, tracks original filename for rename/overwrite
 var pending_screenshots: Array[Dictionary] = []  # Screenshots for editing (independent of recording engine)
 
 func _ready():
 	main_viewport = get_viewport()
-	layer = 100  # Above everything
+	layer = 200  # Above board loading overlay (layer 100) and other UI
 	process_mode = Node.PROCESS_MODE_ALWAYS  # Work even when paused
 	_setup_virtual_cursor()
 	_setup_playback_engine()
@@ -158,18 +186,43 @@ func _setup_test_executor():
 	_executor.test_started.connect(_on_executor_test_started)
 	_executor.test_completed.connect(_on_executor_test_completed)
 	_executor.test_result_ready.connect(_on_executor_test_result)
+	_executor.step_changed.connect(_on_executor_step_changed)
+	_executor.paused_changed.connect(_on_executor_paused_changed)
+	_executor.position_debug.connect(_on_executor_position_debug)
+	_setup_playback_hud()
 
 func _on_executor_test_started(test_name: String):
 	current_test_name = test_name
 	test_mode_active = true
 	test_mode_changed.emit(true)
 	test_started.emit(test_name)
+	# Only show debug HUD when in step/debug mode
+	if _executor and _executor.step_mode:
+		_show_playback_hud()
 
 func _on_executor_test_completed(test_name: String, passed: bool):
 	test_mode_active = false
 	test_mode_changed.emit(false)
 	test_completed.emit(test_name, passed)
 	current_test_name = ""
+	_debug_here_mode = false  # Reset debug mode
+	_hide_playback_hud()
+	# Reset step mode for next test
+	_executor.set_step_mode(false)
+
+func _on_executor_step_changed(step_index: int, total_steps: int, event: Dictionary):
+	_update_playback_hud(step_index, total_steps, event)
+
+func _on_executor_paused_changed(paused: bool):
+	_update_playback_hud_pause_state(paused)
+	# Show/hide mouse cursor based on pause state
+	if paused:
+		Input.set_mouse_mode(Input.MOUSE_MODE_VISIBLE)
+	else:
+		Input.set_mouse_mode(Input.MOUSE_MODE_HIDDEN)
+
+func _on_executor_position_debug(debug_info: Dictionary):
+	_update_playback_hud_position(debug_info)
 
 func _on_executor_test_result(result: Dictionary):
 	# Store result and show panel (unless in batch mode)
@@ -197,10 +250,75 @@ func _setup_event_editor():
 	_event_editor.save_requested.connect(_on_event_editor_save_requested)
 
 func _on_event_editor_cancelled():
+	# Emit run completed so app can restore state (exit fullscreen, return to original board)
+	ui_test_runner_run_completed.emit()
+
+	# Return to Test Manager
+	_open_test_selector()
+
+func _cancel_and_discard_test():
+	# Close the event editor
+	_event_editor.close()
+
+	# Delete any screenshots captured during this recording session
+	for screenshot in pending_screenshots:
+		var path = screenshot.get("path", "")
+		if not path.is_empty():
+			var global_path = ProjectSettings.globalize_path(path)
+			if FileAccess.file_exists(global_path):
+				DirAccess.remove_absolute(global_path)
+				print("[UITestRunner] Deleted screenshot: ", path)
+
+	# Also delete the pending baseline if it exists
+	if not pending_baseline_path.is_empty():
+		var global_path = ProjectSettings.globalize_path(pending_baseline_path)
+		if FileAccess.file_exists(global_path):
+			DirAccess.remove_absolute(global_path)
+			print("[UITestRunner] Deleted baseline: ", pending_baseline_path)
+
+	# Clear all pending state
+	pending_screenshots.clear()
+	pending_baseline_path = ""
+	pending_baseline_region = {}
+	pending_test_name = ""
+	recorded_events.clear()
+	if _recording:
+		_recording.recorded_events.clear()
+		_recording.recorded_screenshots.clear()
+
+	print("[UITestRunner] Test recording cancelled and discarded")
+
+	# Emit run completed so app can restore state (exit fullscreen, return to original board)
+	ui_test_runner_run_completed.emit()
+
 	# Return to Test Manager
 	_open_test_selector()
 
 func _on_event_editor_save_requested(test_name: String):
+	# Check if this is a rename (editing existing test with different name)
+	var new_filename = test_name.to_snake_case().replace(" ", "_")
+	var is_rename = not editing_original_filename.is_empty() and editing_original_filename != new_filename
+
+	# Prevent overwriting a different existing test
+	if is_rename and FileIO.test_exists(new_filename):
+		push_error("[UITestRunner] Cannot rename: test '%s' already exists!" % new_filename)
+		print("[UITestRunner] ERROR: Cannot rename to '%s' - a test with that name already exists." % new_filename)
+		return
+
+	if is_rename:
+		print("[UITestRunner] Renaming test: %s -> %s" % [editing_original_filename, new_filename])
+		# Transfer category from old name to new name
+		var old_category = CategoryManager.get_test_category(editing_original_filename)
+		if not old_category.is_empty():
+			CategoryManager.set_test_category(new_filename, old_category)
+		# Delete old test file
+		FileIO.delete_test(editing_original_filename)
+		# Clear old category entry
+		CategoryManager.set_test_category(editing_original_filename, "")
+
+	# Clear the editing tracker
+	editing_original_filename = ""
+
 	# Save test to file
 	var saved_path = _save_test(test_name, pending_baseline_path if not pending_baseline_path.is_empty() else null)
 	if saved_path:
@@ -209,16 +327,19 @@ func _on_event_editor_save_requested(test_name: String):
 	# Print code for reference
 	_event_editor.print_test_code()
 
+	# Emit run completed so app can restore state (exit fullscreen, return to original board)
+	ui_test_runner_run_completed.emit()
+
 	# Open Test Manager after save
 	_open_test_selector()
 
 func _setup_test_manager():
 	_test_manager = TestManager.new()
 	_test_manager.initialize(get_tree(), self)
-	_test_manager.test_selected.connect(_on_manager_test_selected)
 	_test_manager.test_run_requested.connect(_on_manager_test_run)
+	_test_manager.test_debug_requested.connect(_on_manager_test_debug)
 	_test_manager.test_delete_requested.connect(_on_delete_test)
-	_test_manager.test_rename_requested.connect(_on_rename_test)
+	_test_manager.test_rename_requested.connect(_on_inline_rename_test)
 	_test_manager.test_edit_requested.connect(_on_edit_test)
 	_test_manager.test_update_baseline_requested.connect(_on_update_baseline)
 	_test_manager.record_new_requested.connect(_on_record_new_test)
@@ -227,12 +348,15 @@ func _setup_test_manager():
 	_test_manager.results_clear_requested.connect(_clear_results_history)
 	_test_manager.view_failed_step_requested.connect(_on_view_failed_step)
 	_test_manager.view_diff_requested.connect(_view_failed_test_diff)
+	_test_manager.speed_changed.connect(_on_speed_selected)
 	_test_manager.closed.connect(_on_test_manager_closed)
 
-func _on_manager_test_selected(test_name: String):
-	_on_test_selected(test_name)
-
 func _on_manager_test_run(test_name: String):
+	_run_test_from_file(test_name)
+
+func _on_manager_test_debug(test_name: String):
+	# Run test in step mode with full environment setup + position debug info
+	_executor.set_step_mode(true)
 	_run_test_from_file(test_name)
 
 func _on_test_manager_closed():
@@ -314,13 +438,21 @@ func _create_fallback_cursor():
 	add_child(virtual_cursor)
 
 func _input(event):
+	# Forward mouse events to test manager for drag handling (needs _input, not _unhandled_input)
+	if _test_manager and _test_manager.is_open:
+		if event is InputEventMouseMotion or event is InputEventMouseButton:
+			if _test_manager.handle_input(event):
+				get_viewport().set_input_as_handled()
+				return
+
 	# Capture ALL input events while recording (before controls handle them)
 	if is_recording and _recording:
 		if event is InputEventMouseButton:
-			print("[REC-INPUT] MouseButton pressed=%s at %s" % [event.pressed, event.global_position])
-			_recording.capture_event(event)
+			# Skip recording clicks on HUD buttons (they're UI controls, not test actions)
+			# Board checks _is_click_on_automation_ui() separately to avoid deselection
+			if not _recording.is_click_on_hud(event.global_position):
+				_recording.capture_event(event)
 		elif event is InputEventKey and event.pressed:
-			print("[REC-INPUT] Key keycode=%d (%s) ctrl=%s shift=%s" % [event.keycode, OS.get_keycode_string(event.keycode), event.ctrl_pressed, event.shift_pressed])
 			if _recording.capture_key_event(event):
 				_mark_key_recorded(event.keycode, event.ctrl_pressed, event.shift_pressed)
 
@@ -337,7 +469,8 @@ func _process(_delta):
 		_check_fallback_keys()
 
 # Common keys to monitor for fallback detection (keys often consumed by apps)
-const FALLBACK_KEYS = [KEY_Z, KEY_Y, KEY_X, KEY_C, KEY_V, KEY_A, KEY_S, KEY_DELETE, KEY_BACKSPACE, KEY_ENTER, KEY_ESCAPE]
+# Note: ESC is excluded - it's used to stop/cancel recording, not recorded as an action
+const FALLBACK_KEYS = [KEY_Z, KEY_Y, KEY_X, KEY_C, KEY_V, KEY_A, KEY_S, KEY_DELETE, KEY_BACKSPACE, KEY_ENTER]
 
 func _check_fallback_keys():
 	if not _recording:
@@ -391,21 +524,70 @@ func _mark_key_recorded(keycode: int, ctrl: bool, shift: bool):
 func _unhandled_input(event):
 	# Note: Region selection input is handled by region selector's overlay
 
+	# Forward mouse events to test manager for drag handling
+	if _test_manager and _test_manager.is_open:
+		if _test_manager.handle_input(event):
+			get_viewport().set_input_as_handled()
+			return
+
 	if event is InputEventKey and event.pressed:
-		# ESC to close comparison viewer
-		if event.keycode == KEY_ESCAPE and comparison_viewer and comparison_viewer.visible:
-			_close_comparison_viewer()
-			return
+		# Playback debug controls (only during test execution)
+		if is_running and _executor:
+			if event.keycode == KEY_P:
+				# P = Toggle Pause/Continue
+				if _executor.is_paused:
+					_executor.resume()
+				else:
+					_executor.pause()
+				return
+			elif event.keycode == KEY_SPACE:
+				# Space = Step forward (only when paused)
+				if _executor.is_paused:
+					_executor.step_forward()
+					return
+			elif event.keycode == KEY_R:
+				# R = Restart test
+				_on_playback_hud_restart()
+				return
 
-		# ESC to close rename dialog
-		if event.keycode == KEY_ESCAPE and rename_dialog and rename_dialog.visible:
-			_close_rename_dialog()
-			return
+		# ESC handling - priority order matters
+		if event.keycode == KEY_ESCAPE:
+			# ESC during test execution → cancel test and batch (highest priority)
+			if is_running or is_batch_running:
+				print("[UITestRunner] ESC pressed - cancelling test run")
+				_executor.cancel_test()
+				_batch_cancelled = true
+				return
 
-		# ESC to close test selector
-		if event.keycode == KEY_ESCAPE and is_selector_open:
-			_close_test_selector()
-			return
+			# ESC during region selection → cancel just the selection (not the recording)
+			if is_selecting_region:
+				_region_selector.cancel_selection()
+				return
+
+			# ESC during recording → cancel recording (discard and return to Tests tab)
+			if is_recording:
+				_cancel_recording()
+				return
+
+			# ESC to close comparison viewer
+			if _comparison_viewer and _comparison_viewer.is_visible():
+				_close_comparison_viewer()
+				return
+
+			# ESC to close event editor (cancel/discard test)
+			if _event_editor and _event_editor.is_visible():
+				_cancel_and_discard_test()
+				return
+
+			# ESC to close rename dialog
+			if rename_dialog and rename_dialog.visible:
+				_close_rename_dialog()
+				return
+
+			# ESC to close test selector
+			if is_selector_open:
+				_close_test_selector()
+				return
 
 		if event.keycode == KEY_F9:
 			_start_demo_test()
@@ -461,12 +643,44 @@ func cycle_speed() -> void:
 func get_delay_multiplier() -> float:
 	return _playback.get_delay_multiplier()
 
-# Coordinate conversion
+# Coordinate conversion - uses board's global coordinate system for recording/playback
 func world_to_screen(world_pos: Vector2) -> Vector2:
+	var board = _find_active_board()
+	if board and board.has_method("world_to_global_screen"):
+		return board.world_to_global_screen(world_pos)
 	return _playback.world_to_screen(world_pos)
 
 func screen_to_world(screen_pos: Vector2) -> Vector2:
+	var board = _find_active_board()
+	if board and board.has_method("global_screen_to_world"):
+		return board.global_screen_to_world(screen_pos)
 	return _playback.screen_to_world(screen_pos)
+
+# Cell coordinate helpers - uses board's grid size (default 20x20)
+const DEFAULT_GRID_SIZE := Vector2(20, 20)
+
+func get_grid_size() -> Vector2:
+	var board = _find_active_board()
+	if board and "grid_size" in board:
+		return board.grid_size
+	return DEFAULT_GRID_SIZE
+
+func world_to_cell(world_pos: Vector2) -> Vector2i:
+	# Convert world position to cell coordinates (grid-snapped)
+	var grid = get_grid_size()
+	return Vector2i(
+		roundi(world_pos.x / grid.x),
+		roundi(world_pos.y / grid.y)
+	)
+
+func cell_to_world(cell: Vector2i) -> Vector2:
+	# Convert cell coordinates to world position (top-left of cell)
+	var grid = get_grid_size()
+	return Vector2(cell.x * grid.x, cell.y * grid.y)
+
+func cell_to_screen(cell: Vector2i) -> Vector2:
+	# Convert cell coordinates to global screen position
+	return world_to_screen(cell_to_world(cell))
 
 func get_screen_pos(node: CanvasItem) -> Vector2:
 	return _playback.get_screen_pos(node)
@@ -509,6 +723,51 @@ func type_text(text: String, delay_per_char: float = 0.05) -> void:
 # Wait
 func wait(seconds: float, apply_speed_multiplier: bool = true) -> void:
 	await _playback.wait(seconds, apply_speed_multiplier)
+
+# ============================================================================
+# OBJECT DETECTION - For robust recording/playback
+# ============================================================================
+
+# Finds the active board in the scene tree
+func _find_active_board() -> Node:
+	# Look for a Board node - check common locations
+	var root = get_tree().root
+	# Try Main/ContentContainer/Board pattern (Kilanote structure)
+	var main = root.get_node_or_null("Main")
+	if main:
+		var content = main.get_node_or_null("ContentContainer")
+		if content:
+			for child in content.get_children():
+				if child.has_method("find_item_at_screen_pos"):
+					return child
+	# Fallback: search all children recursively for any node with the method
+	return _find_node_with_method(root, "find_item_at_screen_pos")
+
+func _find_node_with_method(node: Node, method_name: String) -> Node:
+	# Exclude self to prevent infinite recursion (UITestRunner also has find_item_at_screen_pos)
+	if node.has_method(method_name) and node != self:
+		return node
+	for child in node.get_children():
+		var found = _find_node_with_method(child, method_name)
+		if found:
+			return found
+	return null
+
+# Finds an item at the given screen position
+# Returns: {type: String, id: String, screen_pos: Vector2, size: Vector2} or empty dict
+func find_item_at_screen_pos(screen_pos: Vector2) -> Dictionary:
+	var board = _find_active_board()
+	if board:
+		return board.find_item_at_screen_pos(screen_pos)
+	return {}
+
+# Finds an item by type and ID and returns its current screen position
+# Returns Vector2.ZERO if not found
+func get_item_screen_pos_by_id(item_type: String, item_id: String) -> Vector2:
+	var board = _find_active_board()
+	if board and board.has_method("get_item_screen_pos_by_id"):
+		return board.get_item_screen_pos_by_id(item_type, item_id)
+	return Vector2.ZERO
 
 # ============================================================================
 # TEST STRUCTURE
@@ -576,6 +835,35 @@ func _toggle_recording():
 		_recording.stop_recording()
 	else:
 		_recording.start_recording()
+
+func _cancel_recording():
+	# Cancel recording without saving - discard everything and return to Tests tab
+	if not is_recording:
+		return
+
+	print("[UITestRunner] === RECORDING CANCELLED === (ESC pressed)")
+
+	# Stop the recording engine
+	_recording.cancel_recording()
+
+	# Clear any pending data
+	recorded_events.clear()
+	pending_screenshots.clear()
+	rerecording_test_name = ""
+
+	# Reset test mode state
+	test_mode_active = false
+	get_tree().set_meta("automation_is_recording", false)
+	test_mode_changed.emit(false)
+
+	# Emit signal so app can restore state
+	ui_test_runner_run_completed.emit()
+
+	# Open the Tests tab
+	call_deferred("_open_test_selector_to_tests_tab")
+
+func _open_test_selector_to_tests_tab():
+	_test_manager.open()
 
 func _toggle_recording_pause():
 	_recording.toggle_pause()
@@ -721,12 +1009,53 @@ func _serialize_events(events: Array) -> Array:
 				var to_pos = event.get("to", Vector2.ZERO)
 				ser_event["from"] = {"x": from_pos.x, "y": from_pos.y}
 				ser_event["to"] = {"x": to_pos.x, "y": to_pos.y}
+				# no_drop flag for drag segments (T key during recording)
+				if event.get("no_drop", false):
+					ser_event["no_drop"] = true
+				# World coordinates for precise resolution-independent playback
+				var to_world = event.get("to_world", null)
+				if to_world != null and to_world is Vector2:
+					ser_event["to_world"] = {"x": to_world.x, "y": to_world.y}
+				# Cell coordinates for grid-snapped playback (fallback)
+				var to_cell = event.get("to_cell", null)
+				if to_cell != null and to_cell is Vector2i:
+					ser_event["to_cell"] = {"x": to_cell.x, "y": to_cell.y}
+				# Object-relative info for robust playback
+				var object_type = event.get("object_type", "")
+				if not object_type.is_empty():
+					ser_event["object_type"] = object_type
+					ser_event["object_id"] = event.get("object_id", "")
+					var click_offset = event.get("click_offset", Vector2.ZERO)
+					ser_event["click_offset"] = {"x": click_offset.x, "y": click_offset.y}
+			"pan":
+				var from_pos = event.get("from", Vector2.ZERO)
+				var to_pos = event.get("to", Vector2.ZERO)
+				ser_event["from"] = {"x": from_pos.x, "y": from_pos.y}
+				ser_event["to"] = {"x": to_pos.x, "y": to_pos.y}
+			"right_click":
+				var pos = event.get("pos", Vector2.ZERO)
+				ser_event["pos"] = {"x": pos.x, "y": pos.y}
+			"scroll":
+				ser_event["direction"] = event.get("direction", "in")
+				ser_event["ctrl"] = event.get("ctrl", false)
+				ser_event["shift"] = event.get("shift", false)
+				ser_event["alt"] = event.get("alt", false)
+				ser_event["factor"] = event.get("factor", 1.0)
+				var pos = event.get("pos", Vector2.ZERO)
+				ser_event["pos"] = {"x": pos.x, "y": pos.y}
 			"key":
 				ser_event["keycode"] = event.get("keycode", 0)
 				ser_event["shift"] = event.get("shift", false)
 				ser_event["ctrl"] = event.get("ctrl", false)
+				var key_mouse_pos = event.get("mouse_pos", null)
+				if key_mouse_pos != null and key_mouse_pos is Vector2:
+					ser_event["mouse_pos"] = {"x": key_mouse_pos.x, "y": key_mouse_pos.y}
 			"wait":
 				ser_event["duration"] = event.get("duration", 1000)
+			"set_clipboard_image":
+				ser_event["path"] = event.get("path", "")
+				var mouse_pos = event.get("mouse_pos", Vector2.ZERO)
+				ser_event["mouse_pos"] = {"x": mouse_pos.x, "y": mouse_pos.y}
 		# Add wait_after and note for all events
 		ser_event["wait_after"] = event.get("wait_after", 100)
 		var note = event.get("note", "")
@@ -758,8 +1087,37 @@ func _get_ordered_tests(category_name: String, tests: Array) -> Array:
 	return CategoryManager.get_ordered_tests(category_name, tests)
 
 func _run_test_from_file(test_name: String):
-	# Delegate to TestExecutor
-	_executor.run_test_from_file(test_name)
+	# Store for restart functionality
+	_current_running_test_name = test_name
+
+	if _debug_here_mode:
+		# Debug Here mode: skip environment setup, run on current board
+		print("[UITestRunner] Debug Here mode - running on current board")
+		await get_tree().process_frame
+	else:
+		# Normal mode: emit setup signal so app can configure environment
+		ui_test_runner_setup_environment.emit()
+		await get_tree().create_timer(0.5).timeout
+
+		# Emit test starting signal so app can cleanup before test
+		ui_test_runner_test_starting.emit(test_name)
+		await get_tree().create_timer(0.3).timeout
+
+	# Run test and wait for result
+	var result = await _executor.run_test_and_get_result(test_name)
+
+	# Store result for display
+	batch_results.clear()
+	batch_results.append(result)
+
+	# Emit test ended signal
+	ui_test_runner_test_ended.emit(test_name, result.get("passed", false))
+
+	# Emit run completed signal (single test counts as a run)
+	ui_test_runner_run_completed.emit()
+
+	# Show results panel
+	_show_results_panel()
 
 # ============================================================================
 # TEST SELECTOR PANEL
@@ -775,6 +1133,13 @@ func _open_test_selector():
 	if is_running:
 		print("[UITestRunner] Cannot open selector - test running")
 		return
+
+	# Ensure all overlays are hidden before showing Test Manager
+	_region_selector.hide_overlay()
+	if _comparison_viewer and _comparison_viewer.is_visible():
+		_comparison_viewer.close()
+	if _recording:
+		_recording.set_indicator_visible(false)
 
 	_test_manager.batch_results = batch_results
 	_test_manager.open()
@@ -792,9 +1157,23 @@ func _clear_results_history():
 	_update_results_tab()
 
 func _on_record_new_test():
+	# Clear editing tracker - this is a new test, not an edit
+	editing_original_filename = ""
+
 	_close_test_selector()
-	# Small delay to let panel close, then start recording
+	# Small delay to let panel close
 	await get_tree().create_timer(0.1).timeout
+
+	# Emit setup signal so app can configure environment (window size, navigate to test board)
+	ui_test_runner_setup_environment.emit()
+	# Wait for environment setup to complete (window resize, board navigation)
+	await get_tree().create_timer(0.5).timeout
+
+	# Emit test starting signal so app can cleanup before recording
+	ui_test_runner_test_starting.emit("Recording")
+	# Wait for cleanup to complete (clear board, reset zoom, board fully loaded)
+	await get_tree().create_timer(0.5).timeout
+
 	_recording.start_recording()
 
 func _refresh_test_list():
@@ -822,22 +1201,46 @@ func _on_play_category(category_name: String):
 	_close_test_selector()
 	print("[UITestRunner] === RUNNING CATEGORY: %s (%d tests) ===" % [category_name, tests_in_category.size()])
 
+	# Emit setup signal so app can configure environment (window size, navigate to test board)
+	ui_test_runner_setup_environment.emit()
+	# Wait for environment setup to complete (window resize, board navigation)
+	await get_tree().create_timer(0.5).timeout
+
 	is_batch_running = true
+	_batch_cancelled = false
 	batch_results.clear()
 
 	for test_name in tests_in_category:
+		# Check for cancellation before each test
+		if _batch_cancelled:
+			print("[UITestRunner] Category run cancelled by user")
+			break
+
 		print("[UITestRunner] --- Running: %s ---" % test_name)
+		# Emit test starting signal so app can cleanup before test
+		ui_test_runner_test_starting.emit(test_name)
+		# Wait for cleanup to complete (clear board, reset zoom)
+		await get_tree().create_timer(0.3).timeout
+
 		var result = await _run_test_and_get_result(test_name)
 		batch_results.append(result)
+
+		# Emit test ended signal
+		ui_test_runner_test_ended.emit(test_name, result.get("passed", false))
+
+		# Check for cancellation after each test
+		if _batch_cancelled:
+			print("[UITestRunner] Category run cancelled by user")
+			break
+
 		await get_tree().create_timer(0.3).timeout
 
 	is_batch_running = false
-	_show_results_panel()
 
-func _on_test_selected(test_name: String):
-	print("[UITestRunner] Running test: ", test_name)
-	_close_test_selector()
-	_run_test_from_file(test_name)
+	# Emit run completed signal
+	ui_test_runner_run_completed.emit()
+
+	_show_results_panel()
 
 # ============================================================================
 # TEST MANAGEMENT
@@ -845,6 +1248,80 @@ func _on_test_selected(test_name: String):
 
 var rename_dialog: Control = null
 var rename_target_test: String = ""
+
+func _on_inline_rename_test(old_name: String, new_display_name: String) -> void:
+	"""Handle inline rename from test manager - directly renames without dialog"""
+	print("[UITestRunner] Inline rename: old_name='%s', new_display_name='%s'" % [old_name, new_display_name])
+	var display_name = new_display_name.strip_edges()
+	var new_filename = _sanitize_filename(display_name)
+	print("[UITestRunner] Sanitized: display_name='%s', new_filename='%s'" % [display_name, new_filename])
+
+	if new_filename.is_empty() or new_filename == old_name:
+		print("[UITestRunner] No change needed, refreshing list")
+		_refresh_test_list()  # Revert display
+		return
+
+	# Perform the actual rename
+	print("[UITestRunner] Performing rename: '%s' -> '%s'" % [old_name, new_filename])
+	_perform_rename(old_name, display_name, new_filename)
+	_refresh_test_list()
+
+func _perform_rename(old_test_name: String, display_name: String, new_filename: String) -> void:
+	"""Core rename logic used by both inline rename and dialog rename"""
+	# Load old test
+	var old_filepath = TESTS_DIR + "/" + old_test_name + ".json"
+	print("[UITestRunner] Loading test from: %s" % old_filepath)
+	var test_data = _load_test(old_filepath)
+	if test_data.is_empty():
+		print("[UITestRunner] ERROR: Failed to load test data!")
+		return
+	print("[UITestRunner] Loaded test with %d events, name='%s'" % [test_data.get("events", []).size(), test_data.get("name", "")])
+
+	# Update test name in data (preserve display name, not sanitized)
+	test_data.name = display_name
+
+	# Rename baseline file if exists (use sanitized filename)
+	if test_data.has("baseline_path") and test_data.baseline_path:
+		var old_baseline = test_data.baseline_path
+		var new_baseline = old_baseline.get_base_dir() + "/baseline_" + new_filename + ".png"
+
+		var old_global = ProjectSettings.globalize_path(old_baseline)
+		var new_global = ProjectSettings.globalize_path(new_baseline)
+
+		if FileAccess.file_exists(old_global):
+			DirAccess.rename_absolute(old_global, new_global)
+			test_data.baseline_path = new_baseline
+			print("[UITestRunner] Renamed baseline to: ", new_baseline)
+
+	# Save with new filename (sanitized)
+	var new_filepath = TESTS_DIR + "/" + new_filename + ".json"
+	var file = FileAccess.open(new_filepath, FileAccess.WRITE)
+	if file:
+		file.store_string(JSON.stringify(test_data, "\t"))
+		file.close()
+
+	# Delete old test file (only if filename changed)
+	if new_filename != old_test_name:
+		var old_global = ProjectSettings.globalize_path(old_filepath)
+		if FileAccess.file_exists(old_global):
+			DirAccess.remove_absolute(old_global)
+
+	# Preserve category assignment (use filename for category keys)
+	var old_category = CategoryManager.test_categories.get(old_test_name, "")
+	if old_category:
+		CategoryManager.test_categories.erase(old_test_name)
+		CategoryManager.test_categories[new_filename] = old_category
+
+		# Update order within category
+		if CategoryManager.category_test_order.has(old_category):
+			var order = CategoryManager.category_test_order[old_category]
+			var idx = order.find(old_test_name)
+			if idx >= 0:
+				order[idx] = new_filename
+
+		_save_categories()
+
+	print("[UITestRunner] Renamed test: ", old_test_name, " -> ", new_filename, " (display: ", display_name, ")")
 
 func _on_delete_test(test_name: String):
 	# Load test data to get baseline path
@@ -984,67 +1461,32 @@ func _do_rename():
 		_close_rename_dialog()
 		return
 
-	# Load old test
-	var old_filepath = TESTS_DIR + "/" + rename_target_test + ".json"
-	var test_data = _load_test(old_filepath)
-	if test_data.is_empty():
-		_close_rename_dialog()
-		return
-
-	# Update test name in data (preserve display name, not sanitized)
-	test_data.name = display_name
-
-	# Rename baseline file if exists (use sanitized filename)
-	if test_data.has("baseline_path") and test_data.baseline_path:
-		var old_baseline = test_data.baseline_path
-		var new_baseline = old_baseline.get_base_dir() + "/baseline_" + new_filename + ".png"
-
-		var old_global = ProjectSettings.globalize_path(old_baseline)
-		var new_global = ProjectSettings.globalize_path(new_baseline)
-
-		if FileAccess.file_exists(old_global):
-			DirAccess.rename_absolute(old_global, new_global)
-			test_data.baseline_path = new_baseline
-			print("[UITestRunner] Renamed baseline to: ", new_baseline)
-
-	# Save with new filename (sanitized)
-	var new_filepath = TESTS_DIR + "/" + new_filename + ".json"
-	var file = FileAccess.open(new_filepath, FileAccess.WRITE)
-	if file:
-		file.store_string(JSON.stringify(test_data, "\t"))
-		file.close()
-
-	# Delete old test file
-	var old_global = ProjectSettings.globalize_path(old_filepath)
-	if FileAccess.file_exists(old_global):
-		DirAccess.remove_absolute(old_global)
-
-	# Preserve category assignment (use filename for category keys)
-	var old_category = CategoryManager.test_categories.get(rename_target_test, "")
-	if old_category:
-		CategoryManager.test_categories.erase(rename_target_test)
-		CategoryManager.test_categories[new_filename] = old_category
-
-		# Update order within category
-		if CategoryManager.category_test_order.has(old_category):
-			var order = CategoryManager.category_test_order[old_category]
-			var idx = order.find(rename_target_test)
-			if idx >= 0:
-				order[idx] = new_filename
-
-		_save_categories()
-
-	print("[UITestRunner] Renamed test: ", rename_target_test, " -> ", new_filename, " (display: ", display_name, ")")
+	# Use shared rename logic
+	_perform_rename(rename_target_test, display_name, new_filename)
 
 	_close_rename_dialog()
 	_refresh_test_list()
 
 func _on_update_baseline(test_name: String):
-	print("[UITestRunner] Re-recording test: ", test_name)
-	rerecording_test_name = test_name  # Store name to overwrite on save
+	# Load test data to get the original display name (not the filename)
+	var test_data = FileIO.load_test(Utils.TESTS_DIR + "/" + test_name + ".json")
+	var display_name = _get_display_name(test_data, test_name)
+	print("[UITestRunner] Re-recording test: ", display_name)
+	rerecording_test_name = display_name  # Store display name to preserve on save
 	_close_test_selector()
-	# Small delay to let panel close, then start recording
+	# Small delay to let panel close
 	await get_tree().create_timer(0.1).timeout
+
+	# Emit setup signal so app can configure environment (window size, navigate to test board)
+	ui_test_runner_setup_environment.emit()
+	# Wait for environment setup to complete (window resize, board navigation)
+	await get_tree().create_timer(0.5).timeout
+
+	# Emit test starting signal so app can cleanup before recording
+	ui_test_runner_test_starting.emit(test_name)
+	# Wait for cleanup to complete (clear board, reset zoom, board fully loaded)
+	await get_tree().create_timer(0.5).timeout
+
 	_recording.start_recording()
 
 func _on_edit_test(test_name: String):
@@ -1071,6 +1513,13 @@ func _on_edit_test(test_name: String):
 				var to_pos = event.get("to", {})
 				converted_event["from"] = Vector2(from_pos.get("x", 0), from_pos.get("y", 0))
 				converted_event["to"] = Vector2(to_pos.get("x", 0), to_pos.get("y", 0))
+				# Object-relative info for robust playback
+				var object_type = event.get("object_type", "")
+				if not object_type.is_empty():
+					converted_event["object_type"] = object_type
+					converted_event["object_id"] = event.get("object_id", "")
+					var click_offset = event.get("click_offset", {})
+					converted_event["click_offset"] = Vector2(click_offset.get("x", 0), click_offset.get("y", 0))
 			"key":
 				converted_event["keycode"] = event.get("keycode", 0)
 				converted_event["shift"] = event.get("shift", false)
@@ -1107,6 +1556,7 @@ func _on_edit_test(test_name: String):
 	# Set pending data for save (use actual display name from test data)
 	pending_test_name = _get_display_name(test_data, test_name)
 	pending_baseline_path = test_data.get("baseline_path", "")
+	editing_original_filename = test_name  # Track original for rename detection
 
 	# Close test selector and show event editor
 	_close_test_selector()
@@ -1136,6 +1586,13 @@ func _run_test_for_baseline_update(test_name: String):
 				var to_pos = event.get("to", {})
 				converted_event["from"] = Vector2(from_pos.get("x", 0), from_pos.get("y", 0))
 				converted_event["to"] = Vector2(to_pos.get("x", 0), to_pos.get("y", 0))
+				# Object-relative info for robust playback
+				var object_type = event.get("object_type", "")
+				if not object_type.is_empty():
+					converted_event["object_type"] = object_type
+					converted_event["object_id"] = event.get("object_id", "")
+					var click_offset = event.get("click_offset", {})
+					converted_event["click_offset"] = Vector2(click_offset.get("x", 0), click_offset.get("y", 0))
 			"key":
 				converted_event["keycode"] = event.get("keycode", 0)
 				converted_event["shift"] = event.get("shift", false)
@@ -1240,25 +1697,74 @@ func _capture_baseline_for_update(existing_path: String) -> String:
 # ============================================================================
 
 func _run_all_tests():
-	var tests = _get_saved_tests()
-	if tests.is_empty():
+	var saved_tests = _get_saved_tests()
+	if saved_tests.is_empty():
 		print("[UITestRunner] No tests to run")
 		return
+
+	# Build ordered test list by category (same order as category playback)
+	var tests: Array = []
+	var categories = CategoryManager.get_all_categories()
+
+	# Add tests from each category in order
+	for category_name in categories:
+		var tests_in_category: Array = []
+		for test_name in CategoryManager.test_categories.keys():
+			if CategoryManager.test_categories[test_name] == category_name:
+				if test_name in saved_tests:
+					tests_in_category.append(test_name)
+		# Apply category ordering
+		tests_in_category = _get_ordered_tests(category_name, tests_in_category)
+		tests.append_array(tests_in_category)
+
+	# Add uncategorized tests at the end
+	for test_name in saved_tests:
+		if test_name not in tests:
+			tests.append(test_name)
 
 	_close_test_selector()
 	print("[UITestRunner] === RUNNING ALL TESTS (%d tests) ===" % tests.size())
 
+	# Emit setup signal so app can configure environment (window size, navigate to test board)
+	ui_test_runner_setup_environment.emit()
+	# Wait for environment setup to complete (window resize, board navigation)
+	await get_tree().create_timer(0.5).timeout
+
 	is_batch_running = true
+	_batch_cancelled = false
 	batch_results.clear()
 
 	for test_name in tests:
+		# Check for cancellation before starting next test
+		if _batch_cancelled:
+			print("[UITestRunner] Batch cancelled - stopping remaining tests")
+			break
+
 		print("[UITestRunner] --- Running: %s ---" % test_name)
+		# Emit test starting signal so app can cleanup before test
+		ui_test_runner_test_starting.emit(test_name)
+		# Wait for cleanup to complete (clear board, reset zoom)
+		await get_tree().create_timer(0.3).timeout
+
 		var result = await _run_test_and_get_result(test_name)
 		batch_results.append(result)
+
+		# Emit test ended signal
+		ui_test_runner_test_ended.emit(test_name, result.get("passed", false))
+
+		# Check for cancellation after test completes
+		if _batch_cancelled:
+			print("[UITestRunner] Batch cancelled after test")
+			break
+
 		# Small delay between tests
 		await get_tree().create_timer(0.3).timeout
 
 	is_batch_running = false
+
+	# Emit run completed signal
+	ui_test_runner_run_completed.emit()
+
 	_show_results_panel()
 
 func _run_test_and_get_result(test_name: String) -> Dictionary:
@@ -1269,10 +1775,239 @@ func _show_results_panel():
 	# Open Test Manager and switch to Results tab
 	_open_test_selector()
 	_update_results_tab()
-	# Switch to Results tab (index 1)
-	var tabs = test_selector_panel.get_node_or_null("VBoxContainer/TabContainer")
-	if tabs:
-		tabs.current_tab = 1
+	# Switch to Results tab
+	if _test_manager and _test_manager._panel:
+		var tabs = _test_manager._panel.get_node_or_null("VBoxContainer/TabContainer")
+		if tabs:
+			tabs.current_tab = 1  # Results tab
+
+# ============================================================================
+# PLAYBACK DEBUG HUD
+# ============================================================================
+
+func _setup_playback_hud():
+	_playback_hud = Control.new()
+	_playback_hud.name = "PlaybackDebugHUD"
+	_playback_hud.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_playback_hud.set_anchors_preset(Control.PRESET_FULL_RECT)
+	_playback_hud.visible = false
+	_playback_hud.z_index = 25
+	add_child(_playback_hud)
+
+	# Background panel at bottom-right - compact by default
+	var panel = PanelContainer.new()
+	panel.name = "HUDPanel"
+	panel.mouse_filter = Control.MOUSE_FILTER_STOP
+	panel.set_anchors_preset(Control.PRESET_BOTTOM_RIGHT)
+	panel.anchor_left = 1.0
+	panel.anchor_top = 1.0
+	panel.anchor_right = 1.0
+	panel.anchor_bottom = 1.0
+	panel.offset_left = -280
+	panel.offset_top = -100  # Compact height, expands when details shown
+	panel.offset_right = -10
+	panel.offset_bottom = -10
+	_playback_hud.add_child(panel)
+
+	var vbox = VBoxContainer.new()
+	vbox.add_theme_constant_override("separation", 4)
+	panel.add_child(vbox)
+
+	# Top row: Step counter + event description
+	var top_row = HBoxContainer.new()
+	top_row.add_theme_constant_override("separation", 8)
+	vbox.add_child(top_row)
+
+	_playback_hud_step_label = Label.new()
+	_playback_hud_step_label.text = "Step: 0/0"
+	_playback_hud_step_label.add_theme_font_size_override("font_size", 14)
+	top_row.add_child(_playback_hud_step_label)
+
+	_playback_hud_event_label = Label.new()
+	_playback_hud_event_label.text = "..."
+	_playback_hud_event_label.add_theme_font_size_override("font_size", 12)
+	_playback_hud_event_label.add_theme_color_override("font_color", Color(0.7, 0.7, 0.7))
+	_playback_hud_event_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	top_row.add_child(_playback_hud_event_label)
+
+	# Button row
+	var hbox = HBoxContainer.new()
+	hbox.add_theme_constant_override("separation", 6)
+	vbox.add_child(hbox)
+
+	# Step button (only enabled when paused)
+	_playback_hud_step_btn = Button.new()
+	_playback_hud_step_btn.text = ">|"
+	_playback_hud_step_btn.tooltip_text = "Step Forward (Space)"
+	_playback_hud_step_btn.custom_minimum_size = Vector2(40, 28)
+	_playback_hud_step_btn.add_theme_font_size_override("font_size", 14)
+	_playback_hud_step_btn.pressed.connect(_on_playback_hud_step)
+	_playback_hud_step_btn.disabled = true
+	hbox.add_child(_playback_hud_step_btn)
+
+	# Pause/Continue toggle button
+	_playback_hud_pause_continue_btn = Button.new()
+	_playback_hud_pause_continue_btn.text = "⏸"
+	_playback_hud_pause_continue_btn.tooltip_text = "Pause at next step (P)"
+	_playback_hud_pause_continue_btn.custom_minimum_size = Vector2(40, 28)
+	_playback_hud_pause_continue_btn.pressed.connect(_on_playback_hud_pause_continue)
+	hbox.add_child(_playback_hud_pause_continue_btn)
+
+	# Restart button
+	_playback_hud_restart_btn = Button.new()
+	_playback_hud_restart_btn.text = "↺"
+	_playback_hud_restart_btn.tooltip_text = "Restart Test (R)"
+	_playback_hud_restart_btn.custom_minimum_size = Vector2(40, 28)
+	_playback_hud_restart_btn.add_theme_font_size_override("font_size", 16)
+	_playback_hud_restart_btn.pressed.connect(_on_playback_hud_restart)
+	hbox.add_child(_playback_hud_restart_btn)
+
+	# Details toggle button
+	_playback_hud_details_btn = Button.new()
+	_playback_hud_details_btn.text = "▶ Details"
+	_playback_hud_details_btn.tooltip_text = "Show position debug info"
+	_playback_hud_details_btn.custom_minimum_size = Vector2(80, 28)
+	_playback_hud_details_btn.add_theme_font_size_override("font_size", 11)
+	_playback_hud_details_btn.pressed.connect(_on_playback_hud_toggle_details)
+	hbox.add_child(_playback_hud_details_btn)
+
+	# Collapsible details container (starts hidden)
+	_playback_hud_details_container = VBoxContainer.new()
+	_playback_hud_details_container.visible = false
+	_playback_hud_details_container.add_theme_constant_override("separation", 2)
+	vbox.add_child(_playback_hud_details_container)
+
+	# Position debug label (inside details container)
+	_playback_hud_pos_label = Label.new()
+	_playback_hud_pos_label.text = ""
+	_playback_hud_pos_label.add_theme_font_size_override("font_size", 10)
+	_playback_hud_pos_label.add_theme_color_override("font_color", Color(0.8, 0.9, 1.0))
+	_playback_hud_pos_label.autowrap_mode = TextServer.AUTOWRAP_WORD
+	_playback_hud_pos_label.custom_minimum_size = Vector2(250, 0)
+	_playback_hud_details_container.add_child(_playback_hud_pos_label)
+
+func _show_playback_hud():
+	if _playback_hud:
+		_playback_hud.visible = true
+		_update_playback_hud_pause_state(false)
+
+func _hide_playback_hud():
+	if _playback_hud:
+		_playback_hud.visible = false
+
+func _update_playback_hud(step_index: int, total_steps: int, event: Dictionary):
+	if not _playback_hud or not _playback_hud.visible:
+		return
+	_playback_hud_step_label.text = "Step: %d/%d" % [step_index + 1, total_steps]
+	_playback_hud_event_label.text = _executor.get_event_description(event)
+
+	# Show breakpoint indicator
+	if _executor.has_breakpoint(step_index):
+		_playback_hud_step_label.text += " 🔴"
+
+func _update_playback_hud_pause_state(paused: bool):
+	if not _playback_hud:
+		return
+
+	if paused:
+		_playback_hud_pause_continue_btn.text = "▶"
+		_playback_hud_pause_continue_btn.tooltip_text = "Continue running (C)"
+		_playback_hud_step_btn.disabled = false
+	else:
+		_playback_hud_pause_continue_btn.text = "⏸"
+		_playback_hud_pause_continue_btn.tooltip_text = "Pause at next step (P)"
+		_playback_hud_step_btn.disabled = true
+
+func _on_playback_hud_toggle_details():
+	if not _playback_hud_details_container or not _playback_hud_details_btn:
+		return
+
+	var is_visible = _playback_hud_details_container.visible
+	_playback_hud_details_container.visible = not is_visible
+	_playback_hud_details_btn.text = "▼ Details" if not is_visible else "▶ Details"
+
+	# Adjust panel height based on details visibility
+	var panel = _playback_hud.get_node_or_null("HUDPanel")
+	if panel:
+		panel.offset_top = -160 if not is_visible else -100
+
+func _update_playback_hud_position(debug_info: Dictionary):
+	if not _playback_hud or not _playback_hud_pos_label:
+		return
+
+	var event_type = debug_info.get("type", "")
+	var text = ""
+
+	if event_type == "click" or event_type == "double_click":
+		var recorded = debug_info.get("recorded", Vector2.ZERO)
+		var actual = debug_info.get("actual", Vector2.ZERO)
+		text = "Recorded: %s\nActual: %s" % [_v2str(recorded), _v2str(actual)]
+
+	elif event_type == "drag":
+		var mode = debug_info.get("mode", "")
+		var actual_from = debug_info.get("actual_from", Vector2.ZERO)
+		var actual_to = debug_info.get("actual_to", Vector2.ZERO)
+
+		if mode == "object-relative":
+			var obj_type = debug_info.get("object_type", "")
+			var obj_pos = debug_info.get("object_screen_pos", Vector2.ZERO)
+			var offset = debug_info.get("click_offset", Vector2.ZERO)
+			text = "Mode: %s (%s)\nObj@: %s  Offset: %s\nActual: %s → %s" % [
+				mode, obj_type, _v2str(obj_pos), _v2str(offset),
+				_v2str(actual_from), _v2str(actual_to)
+			]
+		elif mode == "absolute-fallback":
+			var obj_type = debug_info.get("object_type", "")
+			text = "Mode: %s (%s NOT FOUND)\nActual: %s → %s" % [
+				mode, obj_type, _v2str(actual_from), _v2str(actual_to)
+			]
+		else:
+			var recorded_from = debug_info.get("recorded_from", Vector2.ZERO)
+			var recorded_to = debug_info.get("recorded_to", Vector2.ZERO)
+			text = "Mode: %s\nRecorded: %s → %s\nActual: %s → %s" % [
+				mode, _v2str(recorded_from), _v2str(recorded_to),
+				_v2str(actual_from), _v2str(actual_to)
+			]
+
+	_playback_hud_pos_label.text = text
+
+# Helper to format Vector2 compactly
+func _v2str(v: Vector2) -> String:
+	return "(%d,%d)" % [int(v.x), int(v.y)]
+
+func _on_playback_hud_pause_continue():
+	if not _executor:
+		return
+	if _executor.is_paused:
+		_executor.resume()
+	else:
+		_executor.pause()
+
+func _on_playback_hud_step():
+	if _executor:
+		_executor.step_forward()
+
+func _on_playback_hud_restart():
+	if _current_running_test_name.is_empty():
+		return
+
+	var test_to_restart = _current_running_test_name
+	var was_step_mode = _executor.step_mode if _executor else false
+
+	# Cancel current test and wait for it to fully complete
+	if _executor and _executor.is_running:
+		_executor.cancel_test()
+		# Wait for the test to fully stop (cleanup, window restore, etc.)
+		while _executor.is_running:
+			await get_tree().process_frame
+
+	# Extra frame to ensure signals are processed
+	await get_tree().process_frame
+
+	# Restart the test with preserved step mode
+	if was_step_mode:
+		_executor.set_step_mode(true)
+	_run_test_from_file(test_to_restart)
 
 func _close_results_panel():
 	# Legacy - now just closes test selector
@@ -1304,6 +2039,13 @@ func _on_view_failed_step(test_name: String, failed_step: int):
 				var to_pos = event.get("to", {})
 				converted_event["from"] = Vector2(from_pos.get("x", 0), from_pos.get("y", 0))
 				converted_event["to"] = Vector2(to_pos.get("x", 0), to_pos.get("y", 0))
+				# Object-relative info for robust playback
+				var object_type = event.get("object_type", "")
+				if not object_type.is_empty():
+					converted_event["object_type"] = object_type
+					converted_event["object_id"] = event.get("object_id", "")
+					var click_offset = event.get("click_offset", {})
+					converted_event["click_offset"] = Vector2(click_offset.get("x", 0), click_offset.get("y", 0))
 			"key":
 				converted_event["keycode"] = event.get("keycode", 0)
 				converted_event["shift"] = event.get("shift", false)
@@ -1444,9 +2186,12 @@ func _generate_test_code(baseline_path: Variant):
 func validate_screenshot(baseline_path: String, region: Rect2) -> bool:
 	# Hide UI elements before capturing
 	var cursor_was_visible = virtual_cursor.visible
+	var hud_was_visible = _playback_hud.visible if _playback_hud else false
 	virtual_cursor.visible = false
 	if recording_indicator:
 		recording_indicator.visible = false
+	if _playback_hud:
+		_playback_hud.visible = false
 
 	# Wait for UI to settle and elements to disappear
 	await get_tree().process_frame
@@ -1462,8 +2207,10 @@ func validate_screenshot(baseline_path: String, region: Rect2) -> bool:
 	var current = image.get_region(region)
 	print("[UITestRunner] Cropped region size: ", current.get_size())
 
-	# Restore cursor visibility
+	# Restore UI visibility
 	virtual_cursor.visible = cursor_was_visible
+	if _playback_hud:
+		_playback_hud.visible = hud_was_visible
 
 	# Load baseline
 	var baseline = Image.load_from_file(ProjectSettings.globalize_path(baseline_path))
@@ -1483,13 +2230,10 @@ func validate_screenshot(baseline_path: String, region: Rect2) -> bool:
 func _save_debug_screenshot(current: Image, baseline_path: String):
 	var debug_path = ScreenshotValidator.save_debug_screenshot(current, baseline_path)
 
-	# Store paths for later viewing
+	# Store paths for later viewing (user can click "View Diff" in results)
 	last_baseline_path = baseline_path
 	last_actual_path = debug_path
-
-	# Only show comparison viewer immediately if not running batch tests
-	if not is_batch_running:
-		call_deferred("_show_comparison_viewer")
+	# Note: Comparison viewer is no longer auto-shown - user clicks "View Diff" in results
 
 func set_compare_mode(mode: CompareMode):
 	ScreenshotValidator.set_compare_mode(mode)
@@ -1585,6 +2329,13 @@ func _comparison_input(event: InputEvent):
 # ============================================================================
 
 func _show_event_editor():
+	# Ensure all overlays are hidden before showing Event Editor
+	_region_selector.hide_overlay()
+	if _comparison_viewer and _comparison_viewer.is_visible():
+		_comparison_viewer.close()
+	if _recording:
+		_recording.set_indicator_visible(false)
+
 	# Transfer state to event editor module
 	_event_editor.recorded_events = recorded_events.duplicate()
 	_event_editor.pending_screenshots = pending_screenshots.duplicate()

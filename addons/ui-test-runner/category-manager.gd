@@ -61,10 +61,15 @@ static func save_categories() -> void:
 # CATEGORY CRUD OPERATIONS
 # =============================================================================
 
-# Returns sorted list of all unique categories
+# Returns sorted list of all unique categories (including empty ones)
 static func get_all_categories() -> Array:
 	var categories = []
+	# Include categories from test assignments
 	for cat in test_categories.values():
+		if cat and cat not in categories:
+			categories.append(cat)
+	# Include empty categories from category_test_order
+	for cat in category_test_order.keys():
 		if cat and cat not in categories:
 			categories.append(cat)
 	categories.sort()
@@ -121,13 +126,13 @@ static func get_ordered_tests(category_name: String, tests: Array) -> Array:
 # COLLAPSE STATE MANAGEMENT
 # =============================================================================
 
-# Checks if a category is collapsed
+# Checks if a category is collapsed (default: true = collapsed)
 static func is_collapsed(category_name: String) -> bool:
-	return collapsed_categories.get(category_name, false)
+	return collapsed_categories.get(category_name, true)
 
 # Toggles collapse state for a category
 static func toggle_collapsed(category_name: String) -> bool:
-	var new_state = not collapsed_categories.get(category_name, false)
+	var new_state = not collapsed_categories.get(category_name, true)
 	collapsed_categories[category_name] = new_state
 	save_categories()
 	return new_state
@@ -176,5 +181,27 @@ static func delete_category(category_name: String) -> void:
 
 	# Remove from collapsed state
 	collapsed_categories.erase(category_name)
+
+	save_categories()
+
+# Renames a category, preserving test assignments and order
+static func rename_category(old_name: String, new_name: String) -> void:
+	if old_name == new_name or new_name.is_empty():
+		return
+
+	# Update all test category assignments
+	for test_name in test_categories.keys():
+		if test_categories[test_name] == old_name:
+			test_categories[test_name] = new_name
+
+	# Move test order to new category name
+	if category_test_order.has(old_name):
+		category_test_order[new_name] = category_test_order[old_name]
+		category_test_order.erase(old_name)
+
+	# Move collapsed state to new category name
+	if collapsed_categories.has(old_name):
+		collapsed_categories[new_name] = collapsed_categories[old_name]
+		collapsed_categories.erase(old_name)
 
 	save_categories()
