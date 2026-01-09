@@ -1,6 +1,6 @@
-# Godot UI Test Runner
+# Godot UI Automation
 
-A visual UI test automation framework for Godot 4.x that enables recording, playback, and validation of user interface interactions.
+A visual UI automation testing framework for Godot 4.x that enables recording, playback, and validation of user interface interactions.
 
 ## Features
 
@@ -14,7 +14,7 @@ A visual UI test automation framework for Godot 4.x that enables recording, play
 
 ## Installation
 
-1. Copy the `addons/ui-test-runner` folder to your project's `addons` directory
+1. Copy the `addons/godot-ui-automation` folder to your project's `addons` directory
 2. Enable the plugin in Project Settings > Plugins
 3. The plugin auto-registers as an autoload singleton
 
@@ -79,7 +79,7 @@ In the Test Manager's Settings tab:
 - **Pixel Tolerance**: Percentage of pixels allowed to differ (0-10%)
 - **Color Threshold**: Maximum RGB difference per pixel (0-50)
 
-Settings are saved to: `user://ui-test-runner-config.cfg`
+Settings are saved to: `user://godot-ui-automation-config.cfg`
 
 ## File Structure
 
@@ -95,7 +95,7 @@ Tests are stored in `res://tests/ui-tests/`:
 ## Support & Community
 
 - **Discord**: https://discord.gg/9GnrTKXGfq
-- **GitHub**: https://github.com/graydwarf/godot-ui-test-runner
+- **GitHub**: https://github.com/graydwarf/godot-ui-automation
 - **More Tools**: https://poplava.itch.io
 
 ## License

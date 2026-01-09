@@ -10,14 +10,14 @@ config_version=5
 
 [application]
 
-config/name="UI Test Runner Plugin"
-config/description="Visual UI Test Automation framework for Godot 4.x"
+config/name="Godot UI Automation"
+config/description="Visual UI automation testing for Godot with virtual cursor and tweened interactions"
 config/features=PackedStringArray("4.5", "Forward Plus")
 
 [autoload]
 
-UITestRunner="*res://addons/ui-test-runner/ui-test-runner.gd"
+UITestRunner="*res://addons/godot-ui-automation/godot-ui-automation.gd"
 
 [editor_plugins]
 
-enabled=PackedStringArray("res://addons/ui-test-runner/plugin.cfg")
+enabled=PackedStringArray("res://addons/godot-ui-automation/plugin.cfg")

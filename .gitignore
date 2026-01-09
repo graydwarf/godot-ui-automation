@@ -21,3 +21,9 @@ tests/baselines/
 # Godot-qube analysis state (user-specific)
 .gdqube.cfg
 .gdqube_state.json
+
+# Export builds
+exports/
+
+# Claude Code settings (user-specific)
+.claude/
