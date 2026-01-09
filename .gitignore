@@ -3,6 +3,7 @@
 
 # Godot-specific ignores
 .import/
+*.import
 export.cfg
 export_credentials.cfg
 
@@ -14,16 +15,9 @@ export_credentials.cfg
 data_*/
 mono_crash.*.json
 
-# Test output files (user-specific)
-tests/ui-tests/
-tests/baselines/
-
 # Godot-qube analysis state (user-specific)
 .gdqube.cfg
 .gdqube_state.json
-
-# Export builds
-exports/
 
 # Claude Code settings (user-specific)
 .claude/
