@@ -1755,8 +1755,8 @@ func _show_env_mismatch_dialog(env_result: Dictionary) -> void:
 	_env_dialog.process_mode = Node.PROCESS_MODE_ALWAYS
 	_env_dialog.z_index = 120
 
-	# Size based on number of mismatches
-	var dialog_height = min(200 + mismatches.size() * 32, 500)
+	# Size based on number of mismatches (2x height for better scroll visibility)
+	var dialog_height = min(400 + mismatches.size() * 64, 1000)
 	var dialog_size = Vector2(550, dialog_height)
 	var viewport_size = _tree.root.get_visible_rect().size
 	_env_dialog.position = (viewport_size - dialog_size) / 2

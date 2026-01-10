@@ -96,6 +96,7 @@ var _passed_step_indices: Array[int] = []  # Steps that passed during test execu
 var _step_mode_test_passed: bool = false  # Whether test passed in step mode (for restart and checkmark)
 var _test_editor_hud_title_edit: LineEdit  # Editable test name in header
 var _test_editor_hud_close_btn: Button  # Close button for F12 flash
+var _test_editor_hud_env_warning: Control  # Yellow environment mismatch warning
 var _hud_saved_focus: Control = null  # Saved focus owner when HUD button is pressed
 
 # Pass/Fail result indicator (shown during test runs)
@@ -2429,6 +2430,25 @@ func _setup_test_editor_hud():
 	header_sep.add_theme_stylebox_override("separator", _create_separator_style())
 	vbox.add_child(header_sep)
 
+	# Environment mismatch warning (yellow banner, hidden by default)
+	_test_editor_hud_env_warning = PanelContainer.new()
+	_test_editor_hud_env_warning.visible = false
+	var warning_style = StyleBoxFlat.new()
+	warning_style.bg_color = Color(1.0, 0.8, 0.2, 0.15)  # Yellow background
+	warning_style.border_color = Color(1.0, 0.7, 0.2, 1.0)  # Orange border
+	warning_style.set_border_width_all(1)
+	warning_style.set_corner_radius_all(4)
+	warning_style.set_content_margin_all(6)
+	_test_editor_hud_env_warning.add_theme_stylebox_override("panel", warning_style)
+	var warning_label = Label.new()
+	warning_label.name = "WarningLabel"
+	warning_label.text = "⚠ Environment mismatch"
+	warning_label.add_theme_font_size_override("font_size", 12)
+	warning_label.add_theme_color_override("font_color", Color(1.0, 0.8, 0.3))
+	warning_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_test_editor_hud_env_warning.add_child(warning_label)
+	vbox.add_child(_test_editor_hud_env_warning)
+
 	# Current event description
 	_test_editor_hud_event_label = Label.new()
 	_test_editor_hud_event_label.text = "Ready..."
@@ -2556,6 +2576,8 @@ func _show_test_editor_hud():
 		# Populate steps if we have events
 		if _test_editor_hud_current_events.size() > 0:
 			_populate_test_editor_hud_steps()
+		# Check environment and show warning if mismatched
+		_update_test_editor_env_warning()
 		# Ensure panel is properly sized
 		_update_test_editor_hud_panel_height()
 
@@ -2610,6 +2632,43 @@ func _disable_step_controls() -> void:
 		_test_editor_hud_pause_continue_btn.disabled = true
 	if _test_editor_hud_step_btn:
 		_test_editor_hud_step_btn.disabled = true
+
+# Check environment and update the warning banner in Test Editor HUD
+func _update_test_editor_env_warning() -> void:
+	if not _test_editor_hud_env_warning or not _executor:
+		return
+
+	# Skip if warnings are globally disabled
+	if not ScreenshotValidator.show_viewport_warnings:
+		_test_editor_hud_env_warning.visible = false
+		return
+
+	# Load current test data to check environment
+	if _current_running_test_name.is_empty():
+		_test_editor_hud_env_warning.visible = false
+		return
+
+	var test_data = _load_test(TESTS_DIR + "/" + _current_running_test_name + ".json")
+	if not test_data:
+		_test_editor_hud_env_warning.visible = false
+		return
+
+	var env_check = _executor.check_environment_match(test_data)
+	if env_check.matches:
+		_test_editor_hud_env_warning.visible = false
+	else:
+		_test_editor_hud_env_warning.visible = true
+		# Update warning text with specific mismatch info
+		var warning_label = _test_editor_hud_env_warning.get_node_or_null("WarningLabel")
+		if warning_label:
+			var current = env_check.get("current", {})
+			var recorded = env_check.get("recorded", {})
+			var curr_vp = current.get("viewport", {})
+			var rec_vp = recorded.get("viewport", {})
+			warning_label.text = "⚠ Resolution mismatch: %dx%d (recorded %dx%d)" % [
+				curr_vp.get("w", 0), curr_vp.get("h", 0),
+				rec_vp.get("w", 0), rec_vp.get("h", 0)
+			]
 
 # Flash the close button to indicate user should close Test Editor first (called when F12 pressed while HUD is open)
 func _flash_test_editor_hud_close_button() -> void:
@@ -3407,6 +3466,8 @@ func _get_focus_to_restore() -> Control:
 func _on_test_editor_hud_play():
 	if not _executor:
 		return
+	# Update environment warning (user may have moved window to different monitor)
+	_update_test_editor_env_warning()
 	if _executor.is_paused:
 		# Play to end: mark all remaining steps as auto-play and run
 		_mark_remaining_steps_auto_play()
@@ -3423,6 +3484,8 @@ func _mark_remaining_steps_auto_play():
 func _on_test_editor_hud_step():
 	if not _executor:
 		return
+	# Update environment warning (user may have moved window to different monitor)
+	_update_test_editor_env_warning()
 	# Restore focus BEFORE stepping so the test step can use it
 	_restore_hud_focus_immediate()
 	_executor.step_forward()
@@ -3518,6 +3581,9 @@ func _on_test_editor_hud_restart():
 
 	# Reset border to white (neutral)
 	_set_test_editor_hud_border_color(Color(1.0, 1.0, 1.0, 1.0))  # White
+
+	# Update environment warning (user may have moved window to different monitor)
+	_update_test_editor_env_warning()
 
 	# Re-enable Play button (was disabled during running)
 	if _test_editor_hud_pause_continue_btn:
@@ -3727,7 +3793,10 @@ func _generate_test_code(baseline_path: Variant):
 	# Clear auto-play steps from any previous test run to ensure fresh recording pauses at step 1
 	_auto_play_steps.clear()
 	_executor.set_step_mode(true)
+
 	# Skip setup delays - environment was already set up during recording
+	# Note: Don't emit ui_test_runner_test_starting here - it would reset board state
+	# and cause coordinate drift. Recording already starts with a reset (line 1741).
 	_run_test_from_file(test_filename, true)
 
 # ============================================================================
