@@ -2636,24 +2636,29 @@ func _disable_step_controls() -> void:
 # Check environment and update the warning banner in Test Editor HUD
 func _update_test_editor_env_warning() -> void:
 	if not _test_editor_hud_env_warning or not _executor:
+		print("[EnvWarning] No HUD or executor")
 		return
 
 	# Skip if warnings are globally disabled
 	if not ScreenshotValidator.show_viewport_warnings:
 		_test_editor_hud_env_warning.visible = false
+		print("[EnvWarning] Warnings disabled globally")
 		return
 
 	# Load current test data to check environment
 	if _current_running_test_name.is_empty():
 		_test_editor_hud_env_warning.visible = false
+		print("[EnvWarning] No current test name")
 		return
 
 	var test_data = _load_test(TESTS_DIR + "/" + _current_running_test_name + ".json")
 	if not test_data:
 		_test_editor_hud_env_warning.visible = false
+		print("[EnvWarning] Could not load test data")
 		return
 
 	var env_check = _executor.check_environment_match(test_data)
+	print("[EnvWarning] env_check: matches=%s, status=%s, message=%s" % [env_check.matches, env_check.get("status", ""), env_check.get("message", "")])
 	if env_check.matches:
 		_test_editor_hud_env_warning.visible = false
 	else:
