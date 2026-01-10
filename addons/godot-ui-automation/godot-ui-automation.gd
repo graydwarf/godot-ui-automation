@@ -177,6 +177,7 @@ var _test_session_active: bool = false  # True when tests have run and window st
 
 # Re-recording state (for Update Baseline)
 var rerecording_test_name: String = ""  # When non-empty, save will overwrite this test
+var _sync_collapse_from_recording: bool = false  # Flag to sync collapse state after recording finishes
 
 # Recording indicator and HUD (now managed by _recording engine)
 # Kept for backwards compatibility with any code referencing these
@@ -316,6 +317,7 @@ func _setup_recording_engine():
 	_recording.recording_stopped.connect(_on_recording_stopped)
 	_recording.recording_cancelled.connect(_on_recording_cancelled)
 	_recording.screenshot_capture_requested.connect(_on_screenshot_capture_requested)
+	_recording.replay_requested.connect(_on_recording_replay_requested)
 
 func _setup_region_selector():
 	_region_selector = RegionSelector.new()
@@ -348,12 +350,18 @@ func _on_executor_test_started(test_name: String):
 	if _executor and _executor.step_mode:
 		# Copy events for the steps panel
 		_test_editor_hud_current_events.clear()
+		# Clear existing step rows so they get rebuilt with new events
+		if _test_editor_hud_steps_list:
+			for child in _test_editor_hud_steps_list.get_children():
+				child.queue_free()
+		_test_editor_hud_step_rows.clear()
 		# Only clear auto-play steps on new test, not restart
 		if not is_restart:
 			_auto_play_steps.clear()
 		for event in _executor._current_events:
 			_test_editor_hud_current_events.append(event.duplicate())
-		_show_test_editor_hud()
+		_show_test_editor_hud(_sync_collapse_from_recording)
+		_sync_collapse_from_recording = false  # Clear flag after use
 
 		# Apply pending failed step highlight (from "Step X" button)
 		if _pending_failed_step_highlight >= 0:
@@ -645,6 +653,7 @@ func _on_recording_started():
 
 func _on_recording_stopped(event_count: int, screenshot_count: int):
 	_set_test_mode(false, true)
+	_sync_collapse_from_recording = true  # Sync collapse state when test editor HUD shows
 	print("[UITestRunner] === RECORDING STOPPED === (%d events, %d screenshots)" % [event_count, screenshot_count])
 
 	# Check if any screenshot_validation events were captured during recording
@@ -664,6 +673,30 @@ func _on_recording_cancelled():
 	_test_manager.open()
 	is_selector_open = true
 	test_selector_panel = _test_manager.get_panel()
+
+func _on_recording_replay_requested(events: Array):
+	# Replay recorded steps, then continue recording
+	print("[UITestRunner] === REPLAY REQUESTED === (%d events)" % events.size())
+
+	# Hide recording indicator during replay to avoid recording replayed events
+	_recording.set_indicator_visible(false)
+
+	# Use executor to play events (without saving/loading test)
+	_executor.play_events_for_replay(events)
+
+	# Listen for replay completion
+	if not _executor.test_completed.is_connected(_on_replay_completed):
+		_executor.test_completed.connect(_on_replay_completed, CONNECT_ONE_SHOT)
+
+func _on_replay_completed(_passed: bool, _failed_step: int):
+	# Replay finished, continue recording
+	print("[UITestRunner] === REPLAY COMPLETED ===")
+
+	# Show recording indicator again
+	_recording.set_indicator_visible(true)
+
+	# Notify recording engine that replay is done
+	_recording.on_replay_completed()
 
 # Check if recorded_events contains any screenshot_validation events
 func _has_screenshot_validation_events() -> bool:
@@ -736,6 +769,7 @@ func _input(event):
 		if event is InputEventMouseButton:
 			# Skip recording clicks on HUD buttons (they're UI controls, not test actions)
 			# Board checks _is_click_on_automation_ui() separately to avoid deselection
+			# Don't mark as handled - let GUI (ScrollContainer etc) receive the event
 			if not _recording.is_click_on_hud(event.global_position):
 				_recording.capture_event(event)
 		elif event is InputEventKey and event.pressed:
@@ -771,6 +805,10 @@ func _check_fallback_keys():
 
 		# Detect new key press
 		if is_pressed and not was_pressed:
+			# Skip if typing in recording UI (note fields, etc.)
+			if _recording._is_typing_in_hud():
+				_last_key_state[keycode] = is_pressed
+				continue
 			# Check if we already recorded this key via _input
 			var already_recorded = _was_key_recently_recorded(keycode, ctrl, shift)
 			if not already_recorded:
@@ -2565,10 +2603,27 @@ func _setup_test_editor_hud():
 	_test_editor_hud_steps_scroll.mouse_filter = Control.MOUSE_FILTER_STOP
 	_test_editor_hud_body_container.add_child(_test_editor_hud_steps_scroll)
 
-	# Margin container to add space between steps and scroll bar
+	# Style wider scrollbar (2x default width ~24px)
+	var vscroll = _test_editor_hud_steps_scroll.get_v_scroll_bar()
+	if vscroll:
+		vscroll.custom_minimum_size.x = 24
+		# Style the grabber
+		var grabber_style = StyleBoxFlat.new()
+		grabber_style.bg_color = Color(0.5, 0.5, 0.55, 0.8)
+		grabber_style.set_corner_radius_all(4)
+		vscroll.add_theme_stylebox_override("grabber", grabber_style)
+		vscroll.add_theme_stylebox_override("grabber_highlight", grabber_style)
+		vscroll.add_theme_stylebox_override("grabber_pressed", grabber_style)
+		# Style the scroll track
+		var scroll_style = StyleBoxFlat.new()
+		scroll_style.bg_color = Color(0.2, 0.2, 0.25, 0.5)
+		scroll_style.set_corner_radius_all(4)
+		vscroll.add_theme_stylebox_override("scroll", scroll_style)
+
+	# Margin container to add space between steps and scroll bar (right margin accounts for 24px scrollbar)
 	var steps_margin = MarginContainer.new()
 	steps_margin.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	steps_margin.add_theme_constant_override("margin_right", 3)
+	steps_margin.add_theme_constant_override("margin_right", 28)
 	_test_editor_hud_steps_scroll.add_child(steps_margin)
 
 	_test_editor_hud_steps_list = VBoxContainer.new()
@@ -2576,9 +2631,19 @@ func _setup_test_editor_hud():
 	_test_editor_hud_steps_list.add_theme_constant_override("separation", 4)
 	steps_margin.add_child(_test_editor_hud_steps_list)
 
-func _show_test_editor_hud():
+func _show_test_editor_hud(sync_collapse_from_recording: bool = false):
 	if _test_editor_hud:
 		_test_editor_hud.visible = true
+
+		# Sync collapse state from Recording UI if transitioning from recording
+		if sync_collapse_from_recording and _recording:
+			var recording_collapsed = _recording.is_collapsed()
+			if _test_editor_hud_collapsed != recording_collapsed:
+				_test_editor_hud_collapsed = recording_collapsed
+				if _test_editor_hud_body_container:
+					_test_editor_hud_body_container.visible = not _test_editor_hud_collapsed
+				if _test_editor_hud_details_btn:
+					_test_editor_hud_details_btn.text = "▼ Details" if not _test_editor_hud_collapsed else "▶ Details"
 
 		# NOTE: Do NOT reset collapsed state or visibility toggle - they should persist across test restarts
 
@@ -3717,6 +3782,9 @@ func _on_test_editor_hud_rerecord():
 
 	# Reset step highlights so new recording starts fresh
 	_reset_step_highlights()
+
+	# Sync collapse state from playback to recording
+	_recording.set_collapsed(_test_editor_hud_collapsed)
 
 	# Hide the Test Editor HUD
 	_hide_test_editor_hud()

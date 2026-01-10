@@ -371,6 +371,46 @@ func _convert_events_from_json(events: Array) -> Array[Dictionary]:
 
 	return result
 
+# Play events for replay during recording - no validation, no step mode
+func play_events_for_replay(events: Array) -> void:
+	if events.is_empty():
+		test_completed.emit(true, -1)
+		return
+
+	# Convert events to typed array
+	var typed_events: Array[Dictionary] = []
+	for event in events:
+		typed_events.append(event)
+
+	# Initialize tracking
+	_current_events = typed_events
+	total_steps = typed_events.size()
+	current_step = -1
+	is_paused = false
+	_step_signal = false
+
+	await begin_test("Replay")
+
+	print("[TestExecutor] Replaying %d events for recording..." % typed_events.size())
+
+	# Play all events without pausing
+	for i in range(typed_events.size()):
+		if _cancelled:
+			break
+
+		current_step = i
+		var event = typed_events[i]
+
+		# Execute the event
+		var wait_after = event.get("wait_after", 100)
+		await _playback.play_event(event, 1.0)  # 1.0 scale
+
+		# Wait after event
+		if wait_after > 0:
+			await _tree.create_timer(wait_after / 1000.0).timeout
+
+	end_test(true)
+
 # Called via call_deferred, emits signal when done
 func _run_replay_with_validation(test_data: Dictionary, recorded_events: Array[Dictionary], file_test_name: String = "") -> void:
 	var result = await _run_replay_internal(test_data, recorded_events, file_test_name)
