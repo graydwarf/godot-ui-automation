@@ -16,7 +16,8 @@ const Utils = preload("res://addons/godot-ui-automation/utils/utils.gd")
 const AUTOLOAD_NAME = "UITestRunner"
 
 func _enter_tree():
-	add_autoload_singleton(AUTOLOAD_NAME, "res://addons/godot-ui-automation/godot-ui-automation.gd")
+	if not ProjectSettings.has_setting("autoload/" + AUTOLOAD_NAME):
+		add_autoload_singleton(AUTOLOAD_NAME, "res://addons/godot-ui-automation/godot-ui-automation.gd")
 	print("[%s] Plugin enabled" % Utils.PLUGIN_NAME)
 
 func _exit_tree():
