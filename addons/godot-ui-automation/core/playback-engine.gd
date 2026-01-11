@@ -675,6 +675,7 @@ func set_clipboard_image(image_path: String, _paste_pos: Variant = null) -> void
 	_log_action("set_clipboard_image", {"path": image_path})
 
 ## Converts keycode to unicode character (public for testing)
+# gdlint:ignore-function:high-complexity=31
 func keycode_to_unicode(keycode: int, shift: bool) -> int:
 	# Letters A-Z
 	if keycode >= KEY_A and keycode <= KEY_Z:
