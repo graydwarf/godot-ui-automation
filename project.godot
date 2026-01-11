@@ -20,4 +20,4 @@ UITestRunner="*res://addons/godot-ui-automation/godot-ui-automation.gd"
 
 [editor_plugins]
 
-enabled=PackedStringArray("res://addons/godot-ui-automation/plugin.cfg")
+enabled=PackedStringArray("res://addons/gdscript-linter/plugin.cfg", "res://addons/godot-ui-automation/plugin.cfg")
