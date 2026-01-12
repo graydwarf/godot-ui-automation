@@ -1,0 +1,11 @@
+# Exclude everything except addons folder from release downloads
+/.claude export-ignore
+/.gdqube.cfg export-ignore
+/.gdqube_state.json export-ignore
+/.godot export-ignore
+/.gitignore export-ignore
+/docs export-ignore
+/scripts export-ignore
+/CLAUDE.md export-ignore
+/project.godot export-ignore
+/README.md export-ignore
