@@ -231,6 +231,10 @@ var _test_session_active: bool = false  # True when tests have run and window st
 var rerecording_test_name: String = ""  # When non-empty, save will overwrite this test
 var _sync_collapse_from_recording: bool = false  # Flag to sync collapse state after recording finishes
 
+# Auto-run mode (command-line triggered)
+var _auto_run_mode: bool = false
+var _exit_on_complete: bool = false
+
 # Recording indicator and HUD (now managed by _recording engine)
 # Kept for backwards compatibility with any code referencing these
 var recording_indicator: Control:
@@ -249,8 +253,14 @@ var editing_original_filename: String = ""  # When editing existing test, tracks
 var pending_screenshots: Array[Dictionary] = []  # Screenshots for editing (independent of recording engine)
 
 func _ready():
-	# Don't initialize in exported/release builds - this is a development tool
-	if not OS.has_feature("editor"):
+	# Check for auto-run mode first (allows running outside editor)
+	# User args (after --) are in get_cmdline_user_args(), engine args in get_cmdline_args()
+	var user_args = OS.get_cmdline_user_args()
+	_auto_run_mode = "--test-all" in user_args
+	_exit_on_complete = "--exit-on-complete" in user_args
+
+	# Don't initialize in exported/release builds - unless in auto-run mode
+	if not OS.has_feature("editor") and not _auto_run_mode:
 		queue_free()
 		return
 
@@ -271,7 +281,63 @@ func _ready():
 	_playback.set_speed(ScreenshotValidator.playback_speed as Speed)
 	# Load test run history from file
 	_load_run_history()
-	print("[%s] Initialized - F12: Test Manager" % Utils.PLUGIN_NAME)
+
+	# Start auto-run if enabled (flags set at top of _ready)
+	if _auto_run_mode:
+		print("[%s] Auto-run mode enabled" % Utils.PLUGIN_NAME)
+		call_deferred("_auto_run_tests")
+	else:
+		print("[%s] Initialized - F12: Test Manager" % Utils.PLUGIN_NAME)
+
+# Auto-run all tests when launched with --test-all flag
+func _auto_run_tests() -> void:
+	# Wait for scene tree to fully initialize
+	await get_tree().process_frame
+	await get_tree().process_frame
+
+	# Mark test session as active (for environment setup signal)
+	_test_session_active = true
+
+	# Get all tests (use same logic as _run_all_tests but skip UI interactions)
+	var saved_tests = _get_saved_tests()
+	if saved_tests.is_empty():
+		print("[UITestRunner] No tests found in res://tests/ui-tests/")
+		if _exit_on_complete:
+			get_tree().quit(1)
+		return
+
+	# Build ordered test list by category (copied from _run_all_tests)
+	var tests: Array = []
+	var categories = CategoryManager.get_all_categories()
+	for category_name in categories:
+		var tests_in_category: Array = []
+		for test_name in CategoryManager.test_categories.keys():
+			if CategoryManager.test_categories[test_name] == category_name:
+				if test_name in saved_tests:
+					tests_in_category.append(test_name)
+		tests_in_category = _get_ordered_tests(category_name, tests_in_category)
+		tests.append_array(tests_in_category)
+	for test_name in saved_tests:
+		if test_name not in tests:
+			tests.append(test_name)
+
+	print("[UITestRunner] === AUTO-RUNNING ALL TESTS (%d tests) ===" % tests.size())
+	await _run_batch_tests(tests)
+
+	# Print summary
+	var passed = batch_results.filter(func(r): return r.get("passed", false)).size()
+	var failed = batch_results.size() - passed
+	print("[UITestRunner] === RESULTS: %d passed, %d failed ===" % [passed, failed])
+
+	# Exit with code OR stay in app for review
+	if _exit_on_complete:
+		var exit_code = 0 if failed == 0 else 1
+		print("[UITestRunner] Exiting with code %d" % exit_code)
+		get_tree().quit(exit_code)
+	else:
+		# Stay in app - show Test Manager with results
+		print("[UITestRunner] Tests complete - opening Test Manager for review")
+		_show_results_panel()
 
 # Track focus changes to preserve text input focus when HUD buttons are clicked
 func _setup_focus_tracking():
@@ -4273,6 +4339,11 @@ func _wait_for_startup_delay() -> bool:
 # Shows warning overlay, waits for startup delay, handles cancellation.
 # Returns true if cancelled (caller should return early).
 func _show_startup_warning_and_wait() -> bool:
+	# Skip warning in auto-run mode
+	if _auto_run_mode:
+		_test_session_active = true
+		return false
+
 	_test_session_active = true
 	_show_test_warning_overlay()
 	if await _wait_for_startup_delay():

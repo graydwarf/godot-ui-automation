@@ -143,7 +143,6 @@ func click(ctrl: bool = false, shift: bool = false) -> void:
 	down.ctrl_pressed = ctrl
 	down.shift_pressed = shift
 	Input.parse_input_event(down)
-	_viewport.push_input(down)
 
 	await _tree.process_frame
 
@@ -156,7 +155,6 @@ func click(ctrl: bool = false, shift: bool = false) -> void:
 	up.ctrl_pressed = ctrl
 	up.shift_pressed = shift
 	Input.parse_input_event(up)
-	_viewport.push_input(up)
 
 	await _tree.process_frame
 
@@ -206,8 +204,7 @@ func drag_to(to: Vector2, duration: float = 0.5, hold_at_end: float = 0.0, ctrl_
 	down.global_position = from
 	down.ctrl_pressed = ctrl_pressed
 	down.shift_pressed = shift_pressed
-	Input.parse_input_event(down)  # Updates Input.is_mouse_button_pressed()
-	_viewport.push_input(down)  # Also push to viewport for GUI routing
+	Input.parse_input_event(down)  # Updates Input.is_mouse_button_pressed() and routes to GUI
 	await _tree.process_frame
 
 	if multiplier == 0.0:
@@ -258,8 +255,7 @@ func drag_to(to: Vector2, duration: float = 0.5, hold_at_end: float = 0.0, ctrl_
 	up.global_position = to
 	up.ctrl_pressed = ctrl_pressed
 	up.shift_pressed = shift_pressed
-	Input.parse_input_event(up)  # Updates Input.is_mouse_button_pressed()
-	_viewport.push_input(up)  # Also push to viewport for GUI routing
+	Input.parse_input_event(up)  # Updates Input.is_mouse_button_pressed() and routes to GUI
 
 	# Release modifier keys after drag ends
 	if shift_pressed:
@@ -309,7 +305,6 @@ func drag_segment(from: Vector2, to: Vector2, duration: float = 0.5, ctrl_presse
 		down.ctrl_pressed = ctrl_pressed
 		down.shift_pressed = shift_pressed
 		Input.parse_input_event(down)
-		_viewport.push_input(down)
 		await _tree.process_frame
 
 	if multiplier == 0.0:
@@ -399,7 +394,6 @@ func _release_mouse_button() -> void:
 	up.position = pos
 	up.global_position = pos
 	Input.parse_input_event(up)
-	_viewport.push_input(up)
 
 ## Complete a drag - release mouse at current position
 ## Used after drag_segment calls to finalize the drag operation
@@ -412,7 +406,6 @@ func complete_drag() -> void:
 	up.position = pos
 	up.global_position = pos
 	Input.parse_input_event(up)
-	_viewport.push_input(up)
 	await _tree.process_frame
 	_log_action("complete_drag", {"pos": pos})
 
@@ -439,14 +432,13 @@ func right_click() -> void:
 	_emit_motion(pos, Vector2.ZERO)
 	await _tree.process_frame
 
-	# Mouse down - use parse_input_event to update Input singleton state
+	# Mouse down
 	var down = InputEventMouseButton.new()
 	down.button_index = MOUSE_BUTTON_RIGHT
 	down.pressed = true
 	down.position = pos
 	down.global_position = pos
 	Input.parse_input_event(down)
-	_viewport.push_input(down)
 
 	await _tree.process_frame
 
@@ -457,7 +449,6 @@ func right_click() -> void:
 	up.position = pos
 	up.global_position = pos
 	Input.parse_input_event(up)
-	_viewport.push_input(up)
 
 	await _tree.process_frame
 	_log_action("right_click", {"position": pos})
@@ -483,7 +474,6 @@ func double_click(ctrl: bool = false, shift: bool = false) -> void:
 		down.ctrl_pressed = ctrl
 		down.shift_pressed = shift
 		Input.parse_input_event(down)
-		_viewport.push_input(down)
 		await _tree.process_frame
 
 		var up = InputEventMouseButton.new()
@@ -494,7 +484,6 @@ func double_click(ctrl: bool = false, shift: bool = false) -> void:
 		up.ctrl_pressed = ctrl
 		up.shift_pressed = shift
 		Input.parse_input_event(up)
-		_viewport.push_input(up)
 		await _tree.process_frame
 
 	# Release modifier keys AFTER double click
@@ -517,7 +506,6 @@ func pan_to(to: Vector2, duration: float = 0.3) -> void:
 	down.position = from
 	down.global_position = from
 	Input.parse_input_event(down)
-	_viewport.push_input(down)
 	await _tree.process_frame
 
 	# Smooth movement to target
@@ -531,7 +519,7 @@ func pan_to(to: Vector2, duration: float = 0.3) -> void:
 		motion.position = pos
 		motion.global_position = pos
 		motion.relative = (to - from) / steps
-		_viewport.push_input(motion)
+		Input.parse_input_event(motion)
 		await _tree.process_frame
 
 	# Middle mouse up
@@ -541,7 +529,6 @@ func pan_to(to: Vector2, duration: float = 0.3) -> void:
 	up.position = to
 	up.global_position = to
 	Input.parse_input_event(up)
-	_viewport.push_input(up)
 
 	await _tree.process_frame
 	_log_action("pan_to", {"from": from, "to": to})
