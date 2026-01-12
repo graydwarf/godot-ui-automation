@@ -79,7 +79,9 @@ func _warn_missing_handlers() -> void:
 # Get setup config for a test (for passing to ui_test_runner_test_starting signal)
 # Returns dictionary with recorded_viewport and window_mode info
 func _get_test_setup_config(test_name: String) -> Dictionary:
-	var filepath = TESTS_DIR + "/" + test_name + ".json"
+	# Convert display name to filename format (e.g., "New Test 1" -> "new_test_1")
+	var filename = Utils.sanitize_filename(test_name)
+	var filepath = TESTS_DIR + "/" + filename + ".json"
 	var test_data = FileIO.load_test(filepath)
 	if test_data.is_empty():
 		return {}
