@@ -39,6 +39,7 @@ signal speed_changed(speed_index: int)
 signal test_rerun_requested(test_name: String, result_index: int)
 signal test_debug_from_results_requested(test_name: String)
 signal run_rerun_all_requested(test_names: Array)
+signal run_delete_requested(run_id: String)
 signal closed()
 
 var _panel: Panel = null
@@ -71,6 +72,7 @@ var _confirm_dialog: Panel = null
 var _confirm_backdrop: ColorRect = null
 var _pending_delete_test: String = ""
 var _pending_delete_category: String = ""
+var _pending_delete_run: String = ""
 var _pending_clear_history: bool = false
 
 # Input dialog (for new category or rename)
@@ -957,6 +959,16 @@ func _add_run_section(results_list: Control, run_data: Dictionary) -> void:
 	rerun_all_btn.pressed.connect(_on_rerun_all_from_run.bind(test_names))
 	header.add_child(rerun_all_btn)
 
+	# Delete run button
+	var delete_btn = Button.new()
+	delete_btn.icon = load("res://addons/godot-ui-automation/icons/delete.svg")
+	delete_btn.tooltip_text = "Delete this test run and its screenshots"
+	delete_btn.custom_minimum_size = Vector2(28, 28)
+	delete_btn.expand_icon = true
+	delete_btn.icon_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	delete_btn.pressed.connect(_on_delete_run.bind(run_id))
+	header.add_child(delete_btn)
+
 	# Results container (collapsible)
 	var results_container = VBoxContainer.new()
 	results_container.name = "Results_" + run_id
@@ -1305,7 +1317,15 @@ func _on_clear_results() -> void:
 	_pending_clear_history = true
 	_pending_delete_test = ""
 	_pending_delete_category = ""
+	_pending_delete_run = ""
 	_show_confirm_dialog("Clear History", "Are you sure you want to clear all test run history?\n\nThis cannot be undone.", "Clear")
+
+func _on_delete_run(run_id: String) -> void:
+	_pending_delete_run = run_id
+	_pending_delete_test = ""
+	_pending_delete_category = ""
+	_pending_clear_history = false
+	_show_confirm_dialog("Delete Test Run", "Are you sure you want to delete this test run and its screenshots?\n\nThis cannot be undone.", "Delete")
 
 func _on_rerun_test(test_name: String, result_index: int) -> void:
 	test_rerun_requested.emit(test_name, result_index)
@@ -1488,18 +1508,22 @@ func _show_confirm_dialog(title: String, message: String, confirm_text: String =
 func _on_confirm_cancel() -> void:
 	_pending_delete_test = ""
 	_pending_delete_category = ""
+	_pending_delete_run = ""
 	_pending_clear_history = false
 	_close_confirm_dialog()
 
 func _on_confirm_delete() -> void:
 	if _pending_clear_history:
 		results_clear_requested.emit()
+	elif not _pending_delete_run.is_empty():
+		run_delete_requested.emit(_pending_delete_run)
 	elif not _pending_delete_test.is_empty():
 		_on_test_delete(_pending_delete_test)
 	elif not _pending_delete_category.is_empty():
 		_on_delete_category(_pending_delete_category)
 	_pending_delete_test = ""
 	_pending_delete_category = ""
+	_pending_delete_run = ""
 	_pending_clear_history = false
 	_close_confirm_dialog()
 

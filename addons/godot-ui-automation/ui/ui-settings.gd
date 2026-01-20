@@ -69,6 +69,7 @@ func create_settings_content() -> PanelContainer:
 
 	_create_playback_section()
 	_create_recording_options_section()
+	_create_cleanup_section()
 
 	return outer_panel
 
@@ -444,3 +445,89 @@ func _on_startup_delay_selected(index: int) -> void:
 				ScreenshotValidator.startup_delay = startup_dd.get_item_id(index)
 				ScreenshotValidator.save_config()
 				return
+
+# ============================================================================
+# TEST RUN CLEANUP SECTION
+# ============================================================================
+
+var _max_runs_spinbox: SpinBox
+
+func _create_cleanup_section() -> void:
+	var section = PanelContainer.new()
+	var style = StyleBoxFlat.new()
+	style.bg_color = Color(0.08, 0.08, 0.1, 0.4)
+	style.border_color = Color(0.35, 0.35, 0.4, 0.8)
+	style.set_border_width_all(1)
+	style.set_corner_radius_all(6)
+	style.set_content_margin_all(16)
+	section.add_theme_stylebox_override("panel", style)
+	_content.add_child(section)
+
+	var vbox = VBoxContainer.new()
+	vbox.add_theme_constant_override("separation", 15)
+	section.add_child(vbox)
+
+	# Section header with blue title and separator
+	var header_container = VBoxContainer.new()
+	header_container.add_theme_constant_override("separation", 4)
+	vbox.add_child(header_container)
+
+	var label = Label.new()
+	label.text = "Test Run Cleanup"
+	label.add_theme_font_size_override("font_size", 17)
+	label.add_theme_color_override("font_color", Color(0.5, 0.8, 0.95))
+	header_container.add_child(label)
+
+	var sep = HSeparator.new()
+	sep.add_theme_stylebox_override("separator", _create_separator_style())
+	header_container.add_child(sep)
+
+	# Auto-cleanup checkbox
+	var auto_cleanup_check = CheckBox.new()
+	auto_cleanup_check.name = "AutoCleanupCheck"
+	auto_cleanup_check.text = "Auto-cleanup old test runs"
+	auto_cleanup_check.add_theme_font_size_override("font_size", 16)
+	auto_cleanup_check.button_pressed = ScreenshotValidator.auto_cleanup_enabled
+	auto_cleanup_check.toggled.connect(_on_auto_cleanup_toggle)
+	vbox.add_child(auto_cleanup_check)
+
+	# Max runs row
+	var max_runs_row = HBoxContainer.new()
+	max_runs_row.add_theme_constant_override("separation", 10)
+	vbox.add_child(max_runs_row)
+
+	var max_runs_label = Label.new()
+	max_runs_label.text = "Max test runs to keep:"
+	max_runs_label.add_theme_font_size_override("font_size", 14)
+	max_runs_label.custom_minimum_size.x = 150
+	max_runs_row.add_child(max_runs_label)
+
+	_max_runs_spinbox = SpinBox.new()
+	_max_runs_spinbox.name = "MaxRunsSpinBox"
+	_max_runs_spinbox.min_value = 5
+	_max_runs_spinbox.max_value = 100
+	_max_runs_spinbox.step = 1
+	_max_runs_spinbox.value = ScreenshotValidator.max_run_history
+	_max_runs_spinbox.editable = ScreenshotValidator.auto_cleanup_enabled
+	_max_runs_spinbox.custom_minimum_size.x = 80
+	_max_runs_spinbox.value_changed.connect(_on_max_runs_changed)
+	max_runs_row.add_child(_max_runs_spinbox)
+
+	# Description text
+	var desc = Label.new()
+	desc.text = "When enabled, oldest runs are automatically deleted when limit is exceeded."
+	desc.add_theme_font_size_override("font_size", 12)
+	desc.add_theme_color_override("font_color", Color(0.6, 0.6, 0.65))
+	desc.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	vbox.add_child(desc)
+
+func _on_auto_cleanup_toggle(pressed: bool) -> void:
+	ScreenshotValidator.auto_cleanup_enabled = pressed
+	ScreenshotValidator.save_config()
+	# Enable/disable spinbox based on checkbox state
+	if _max_runs_spinbox:
+		_max_runs_spinbox.editable = pressed
+
+func _on_max_runs_changed(value: float) -> void:
+	ScreenshotValidator.max_run_history = int(value)
+	ScreenshotValidator.save_config()

@@ -677,6 +677,7 @@ func _setup_test_manager():
 	_test_manager.test_rerun_requested.connect(_on_rerun_test_from_results)
 	_test_manager.test_debug_from_results_requested.connect(_on_debug_test_from_results)
 	_test_manager.run_rerun_all_requested.connect(_on_rerun_all_from_run)
+	_test_manager.run_delete_requested.connect(_delete_test_run)
 	_test_manager.closed.connect(_on_test_manager_closed)
 
 func _on_manager_test_run(test_name: String):
@@ -1811,10 +1812,57 @@ func _close_test_selector(for_test_run: bool = false):
 
 
 func _clear_results_history():
+	# Delete all actual screenshots before clearing history
+	for run in test_run_history:
+		_delete_actual_screenshots_for_run(run)
 	test_run_history.clear()
 	batch_results.clear()
 	_save_run_history()
 	_update_results_tab()
+
+# Deletes a specific test run and its actual screenshots
+func _delete_test_run(run_id: String) -> void:
+	# Find the run in history
+	var run_index = -1
+	for i in range(test_run_history.size()):
+		if test_run_history[i].get("id", "") == run_id:
+			run_index = i
+			break
+
+	if run_index == -1:
+		print("[UITestRunner] Run not found: %s" % run_id)
+		return
+
+	# Delete actual screenshots for this run
+	_delete_actual_screenshots_for_run(test_run_history[run_index])
+
+	# Remove from history
+	test_run_history.remove_at(run_index)
+	_save_run_history()
+	_update_results_tab()
+	print("[UITestRunner] Deleted test run: %s" % run_id)
+
+# Deletes all _actual.png screenshots associated with a test run
+func _delete_actual_screenshots_for_run(run: Dictionary) -> void:
+	var results = run.get("results", [])
+	for result in results:
+		var actual_path = result.get("actual_path", "")
+		if actual_path.is_empty():
+			continue
+
+		# Delete the actual screenshot file
+		var global_path = ProjectSettings.globalize_path(actual_path)
+		if FileAccess.file_exists(actual_path):
+			var err = DirAccess.remove_absolute(global_path)
+			if err == OK:
+				print("[UITestRunner] Deleted: %s" % actual_path)
+			else:
+				print("[UITestRunner] Failed to delete: %s (error %d)" % [actual_path, err])
+
+		# Also delete the .import file if it exists
+		var import_path = actual_path + ".import"
+		if FileAccess.file_exists(import_path):
+			DirAccess.remove_absolute(ProjectSettings.globalize_path(import_path))
 
 # Creates a new test run and returns its ID
 func _start_test_run() -> String:
@@ -1853,9 +1901,16 @@ func _end_test_run(results: Array) -> void:
 	if _test_manager:
 		_test_manager.set_expanded_run(run_data.id)
 
-	# Trim to max history size
-	while test_run_history.size() > MAX_RUN_HISTORY:
-		test_run_history.pop_back()
+	# FIFO auto-cleanup if enabled, otherwise use default max
+	var max_runs = MAX_RUN_HISTORY
+	if ScreenshotValidator.auto_cleanup_enabled:
+		max_runs = ScreenshotValidator.max_run_history
+
+	# Trim to max history size, deleting screenshots from removed runs
+	while test_run_history.size() > max_runs:
+		var old_run = test_run_history.pop_back()
+		_delete_actual_screenshots_for_run(old_run)
+		print("[UITestRunner] Auto-cleanup: removed run %s" % old_run.get("id", "unknown"))
 
 	_current_run_id = ""
 	_save_run_history()

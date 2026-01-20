@@ -19,6 +19,13 @@ mono_crash.*.json
 .gdqube.cfg
 .gdqube_state.json
 
+# GDLint plugin (user-specific)
+.gdlint.cfg
+.gdlint_state.json
+
 # Claude Code settings (user-specific)
 .claude/
 tmpclaude-*
+
+# UI Automation - debug screenshots from failed validation
+*_actual.png

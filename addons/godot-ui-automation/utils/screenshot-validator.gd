@@ -39,6 +39,10 @@ static var show_viewport_warnings: bool = true  # Show viewport mismatch warning
 # Playback behavior settings
 static var startup_delay: int = 3000  # Delay before test starts (ms) - time to remove hands from mouse
 
+# Test run cleanup settings
+static var auto_cleanup_enabled: bool = false  # FIFO cleanup disabled by default
+static var max_run_history: int = 25  # Maximum test runs to keep when auto-cleanup enabled
+
 # =============================================================================
 # CONFIGURATION
 # =============================================================================
@@ -74,6 +78,8 @@ static func save_config() -> void:
 	config.set_value("recording", "default_click_delay", default_click_delay)
 	config.set_value("recording", "show_viewport_warnings", show_viewport_warnings)
 	config.set_value("playback", "startup_delay", startup_delay)
+	config.set_value("cleanup", "auto_cleanup_enabled", auto_cleanup_enabled)
+	config.set_value("cleanup", "max_run_history", max_run_history)
 	var err = config.save(CONFIG_PATH)
 	if err == OK:
 		print("[UITestRunner] Config saved to %s (speed=%d)" % [ProjectSettings.globalize_path(CONFIG_PATH), playback_speed])
@@ -102,6 +108,8 @@ static func load_config() -> void:
 	default_click_delay = config.get_value("recording", "default_click_delay", 350)
 	show_viewport_warnings = config.get_value("recording", "show_viewport_warnings", true)
 	startup_delay = config.get_value("playback", "startup_delay", 3000)
+	auto_cleanup_enabled = config.get_value("cleanup", "auto_cleanup_enabled", false)
+	max_run_history = config.get_value("cleanup", "max_run_history", 25)
 	print("[UITestRunner] Config loaded from %s - Speed: %d, Mode: %s, ClickDelay: %dms, StartupDelay: %dms" % [
 		full_path, playback_speed, CompareMode.keys()[compare_mode], default_click_delay, startup_delay
 	])
